@@ -19,7 +19,8 @@ REQUIRED_FILES = {
     "aadhaar_engine.py": "Core Aadhaar backend engine",
     "retrive-eid.py": "Phase 1 bypass subprocess",
     "aadhar-downlaod.py": "Phase 2 download subprocess",
-    "pdf_processor.py": "PDF processing engine"
+    "pdf_processor.py": "PDF processing engine",
+    "proxy_loader.py": "Shared proxy loader utility",
 }
 
 def check_startup_requirements():
@@ -90,6 +91,20 @@ def check_startup_requirements():
         print("  🔴 .env Configuration File -> MISSING")
         token_found = False
         admin_found = False
+    
+    # 5. Check proxies.txt (optional but recommended)
+    print("\n🌐 Verifying Proxy Configuration:")
+    print("------------------------------------------------------------")
+    proxy_path = os.path.join(base_dir, "proxies.txt")
+    if os.path.exists(proxy_path):
+        try:
+            with open(proxy_path, 'r', encoding='utf-8', errors='ignore') as f:
+                proxy_lines = [l.strip() for l in f if l.strip() and not l.strip().startswith('#')]
+            print(f"  🟢 proxies.txt             -> FOUND ({len(proxy_lines)} proxies)")
+        except Exception as e:
+            print(f"  🟡 proxies.txt             -> FOUND (read error: {e})")
+    else:
+        print("  🟡 proxies.txt             -> NOT FOUND (running direct, may fail on UIDAI datacenter block)")
         
     print("============================================================\n")
     
