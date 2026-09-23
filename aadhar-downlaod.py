@@ -13,7 +13,8 @@ CAPTCHA_URL = f"{BASE_URL}/audioCaptchaService/api/captcha/v3/generation"
 OTP_URL = f"{BASE_URL}/unifiedAppAuthService/api/v2/generate/aadhaar/otp"
 DOWNLOAD_URL = f"{BASE_URL}/downloadAadhaarService/api/aadhaar/download"
 
-def run_download(eid, chat_id):
+
+def run_download(eid, chat_id, unique_suffix=""):
     # Session to keep cookies/session state
     session = requests.Session()
     from requests.adapters import HTTPAdapter
@@ -140,11 +141,11 @@ def run_download(eid, chat_id):
         raise Exception(last_server_msg)
 
     # Prompt for OTP
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🔑 ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE")
     sys.stdout.flush()
     otp_code = sys.stdin.readline().strip()
-    print("="*60)
+    print("=" * 60)
 
     if not otp_code:
         raise Exception("No OTP entered.")
@@ -170,11 +171,12 @@ def run_download(eid, chat_id):
         # Decode base64 PDF
         pdf_bytes = base64.b64decode(pdf_b64)
 
-        # Save to cracked_aadhar folder
+        # Save to cracked_aadhar folder — unique filename per parallel engine
+        # so concurrent downloads never overwrite each other
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cracked_dir = os.path.join(script_dir, "cracked_aadhar")
         os.makedirs(cracked_dir, exist_ok=True)
-        file_path = os.path.join(cracked_dir, f"Aadhaar_{chat_id}.pdf")
+        file_path = os.path.join(cracked_dir, f"Aadhaar_{chat_id}{unique_suffix}.pdf")
 
         with open(file_path, "wb") as f:
             f.write(pdf_bytes)
@@ -187,16 +189,19 @@ def run_download(eid, chat_id):
         error_msg = dl_data.get('statusMessage', 'Download failed. Please check details/OTP.')
         raise Exception(f"Download failed: {error_msg}")
 
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3:
         EID = sys.argv[1]
         CHAT_ID = sys.argv[2]
+        # Optional 3rd arg: unique suffix (e.g. "_p0", "_p1") for parallel runs
+        UNIQUE_SUFFIX = sys.argv[3] if len(sys.argv) >= 4 else ""
     else:
-        print("Usage: python aadhar-downlaod.py <EID> <CHAT_ID>")
+        print("Usage: python aadhar-downlaod.py <EID> <CHAT_ID> [UNIQUE_SUFFIX]")
         sys.exit(1)
 
     try:
-        run_download(EID, CHAT_ID)
+        run_download(EID, CHAT_ID, unique_suffix=UNIQUE_SUFFIX)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
