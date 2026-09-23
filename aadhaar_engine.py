@@ -28,7 +28,7 @@ DEVELOPER_USERNAME = os.getenv('DEVELOPER_USERNAME', 'DARKVENDOR07')
 # ==============================================================================
 # 🎯 AUTO PIPELINE CONFIG
 # ==============================================================================
-AUTO_PARALLEL_WORKERS = 5        # exactly 5 phones at a time
+AUTO_PARALLEL_WORKERS = 1        # exactly 5 phones at a time
 EID_OTP_TIMEOUT = 60              # 1st OTP wait window
 PDF_OTP_TIMEOUT = 60              # 2nd OTP wait window
 OTP_FALLBACK_TIMEOUT = 20         # extra grace if keyword filter misses
