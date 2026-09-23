@@ -36,7 +36,20 @@ def run_retrieval(name, dob, mobile):
     from urllib3.util import Retry
     retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
-    
+
+    # Attach a random proxy from proxies.txt (ArealProxy etc.)
+    try:
+        import proxy_loader
+        proxy = proxy_loader.apply_proxy(session)
+        if proxy:
+            print(f"🌐 Using proxy: {proxy.split('@')[-1]}")
+        else:
+            print("🌐 No proxy configured — connecting direct.")
+        sys.stdout.flush()
+    except Exception as _pe:
+        print(f"⚠️ Proxy loader failed: {_pe}")
+        sys.stdout.flush()
+
     request_id = str(uuid.uuid4())
 
     # Strict Browser-like Headers
@@ -57,15 +70,15 @@ def run_retrieval(name, dob, mobile):
 
     print("--- STEP 1: Fetching Captcha ---")
     captcha_payload = {
-        "captchaLength": "6", 
-        "captchaType": "2", 
+        "captchaLength": "6",
+        "captchaType": "2",
         "audioCaptchaRequired": True
     }
-    
+
     # Generate list of name candidates (prefixes) to try sequentially
     candidate_names = []
     name_clean = name.strip()
-    
+
     if name_clean.lower() == "mr":
         candidate_names = ["Mr", "Mr.", "Shri", "Sh.", "Kumar"]
     elif name_clean.lower() == "mrs":
@@ -76,22 +89,22 @@ def run_retrieval(name, dob, mobile):
     cap_txn_id = None
     otp_txn_id = None
     last_server_msg = "Failed to send OTP. Try changing prefix to 'Mrs. ' or 'Ms. ' in the code."
-    
+
     success_details_payload = None
     success_captcha_val = None
     technical_diff = False
-    
+
     for full_name in candidate_names:
         if technical_diff:
             break
         print(f"🔍 [RETRIEVAL] Trying name payload: '{full_name}'...")
-        
+
         max_captcha_retries = 3
         attempt = 1
         captcha_attempts = 0
         max_captcha_attempts = 10
         candidate_success = False
-        
+
         while attempt <= max_captcha_retries and captcha_attempts < max_captcha_attempts:
             captcha_attempts += 1
             try:
@@ -101,10 +114,10 @@ def run_retrieval(name, dob, mobile):
                     cap_data = res_cap.json()
                 except ValueError:
                     raise Exception("Aadhaar Portal returned an invalid non-JSON page during captcha load. Gateway might be down.")
-                
+
                 if not cap_data or 'imageBase64' not in cap_data or 'transactionId' not in cap_data:
                     raise Exception("UIDAI captcha generation failed. Invalid server response.")
-                
+
                 img_b64 = cap_data['imageBase64']
                 cap_txn_id = cap_data['transactionId']
 
@@ -121,13 +134,13 @@ def run_retrieval(name, dob, mobile):
                     res = ocr.classification(img_bytes)
                     captcha_val = str(res or '').strip()
                     captcha_val = re.sub(r'[^a-zA-Z0-9]', '', captcha_val)
-                    
+
                     if len(captcha_val) != 6:
                         print(f"⚠️ [OCR] Rejected noisy read '{captcha_val}' (Length {len(captcha_val)} != 6). Fetching new captcha...")
                         continue
-                    
+
                 print(f"Decoded Captcha: {captcha_val}")
-                
+
                 details_payload = {
                     "name": full_name,
                     "mobileNumber": str(mobile),
@@ -178,7 +191,7 @@ def run_retrieval(name, dob, mobile):
                 if attempt == max_captcha_retries or captcha_attempts == max_captcha_attempts:
                     print(f"⚠️ Error for '{full_name}' on attempt {attempt}: {ex}")
                     break
-        
+
         if technical_diff:
             break
         if candidate_success:
@@ -200,7 +213,7 @@ def run_retrieval(name, dob, mobile):
     final_payload = success_details_payload.copy()
     final_payload["otp"] = otp_code
     final_payload["otpTxnId"] = otp_txn_id
-    final_payload["captcha"] = success_captcha_val 
+    final_payload["captcha"] = success_captcha_val
 
     res_final = session.post(RETRIEVE_URL, json=final_payload, headers=headers, timeout=45)
     final_data = res_final.json()
@@ -232,11 +245,11 @@ if __name__ == "__main__":
         print("Please enter Aadhaar Holder Name (with prefix if any):")
         sys.stdout.flush()
         NAME = sys.stdin.readline().strip()
-        
+
         print("Please enter Date of Birth (DD-MM-YYYY):")
         sys.stdout.flush()
         DOB = sys.stdin.readline().strip()
-        
+
         print("Please enter Registered Mobile Number:")
         sys.stdout.flush()
         MOBILE = sys.stdin.readline().strip()
