@@ -20,7 +20,20 @@ def run_download(eid, chat_id):
     from urllib3.util import Retry
     retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
-    
+
+    # Attach a random proxy from proxies.txt (ArealProxy etc.)
+    try:
+        import proxy_loader
+        proxy = proxy_loader.apply_proxy(session)
+        if proxy:
+            print(f"🌐 Using proxy: {proxy.split('@')[-1]}")
+        else:
+            print("🌐 No proxy configured — connecting direct.")
+        sys.stdout.flush()
+    except Exception as _pe:
+        print(f"⚠️ Proxy loader failed: {_pe}")
+        sys.stdout.flush()
+
     request_id = str(uuid.uuid4())
 
     # Browser-like strict headers
@@ -41,11 +54,11 @@ def run_download(eid, chat_id):
 
     print("--- STEP 1: Fetching Captcha ---")
     captcha_payload = {
-        "captchaLength": "6", 
-        "captchaType": "2", 
+        "captchaLength": "6",
+        "captchaType": "2",
         "audioCaptchaRequired": True
     }
-    
+
     max_captcha_retries = 5
     cap_txn_id = None
     captcha_val = None
@@ -63,10 +76,10 @@ def run_download(eid, chat_id):
                 cap_data = res_cap.json()
             except ValueError:
                 raise Exception("Aadhaar Portal returned an invalid non-JSON page during captcha load. Gateway might be down.")
-            
+
             if not cap_data or 'imageBase64' not in cap_data or 'transactionId' not in cap_data:
                 raise Exception("UIDAI captcha generation failed. Invalid server response.")
-            
+
             img_b64 = cap_data['imageBase64']
             cap_txn_id = cap_data['transactionId']
 
@@ -83,13 +96,13 @@ def run_download(eid, chat_id):
                 res = ocr.classification(img_bytes)
                 captcha_val = str(res or '').strip()
                 captcha_val = re.sub(r'[^a-zA-Z0-9]', '', captcha_val)
-                
+
                 if len(captcha_val) != 6:
                     print(f"⚠️ [OCR] Rejected noisy read '{captcha_val}' (Length {len(captcha_val)} != 6). Fetching new captcha...")
                     continue
-                
+
             print(f"Decoded Captcha: {captcha_val}")
-            
+
             # Request OTP
             otp_payload = {
                 "eidNumber": eid,
@@ -153,19 +166,19 @@ def run_download(eid, chat_id):
 
     if dl_data.get('status') == "Success":
         pdf_b64 = dl_data['data']['aadhaarPdf']
-        
+
         # Decode base64 PDF
         pdf_bytes = base64.b64decode(pdf_b64)
-        
+
         # Save to cracked_aadhar folder
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cracked_dir = os.path.join(script_dir, "cracked_aadhar")
         os.makedirs(cracked_dir, exist_ok=True)
         file_path = os.path.join(cracked_dir, f"Aadhaar_{chat_id}.pdf")
-        
+
         with open(file_path, "wb") as f:
             f.write(pdf_bytes)
-            
+
         print(f"\n========================================")
         print(f"🎉 SUCCESS! Aadhaar PDF Downloaded Successfully!")
         print(f"📁 Saved as: {file_path}")
@@ -181,7 +194,7 @@ if __name__ == "__main__":
     else:
         print("Usage: python aadhar-downlaod.py <EID> <CHAT_ID>")
         sys.exit(1)
-        
+
     try:
         run_download(EID, CHAT_ID)
     except Exception as e:
