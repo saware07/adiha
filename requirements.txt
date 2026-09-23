@@ -7,3 +7,5 @@ pymupdf
 phonenumbers
 pysocks
 aiohttp
+Pillow
+PyPDF2
