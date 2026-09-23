@@ -10,24 +10,30 @@ ERROR_LOG_FILE = os.path.join(BASE_DIR, "errors.log")
 stats_lock = threading.RLock()
 error_log_lock = threading.RLock()
 
+
+def _default_stats():
+    return {
+        "total_views": 0,
+        "today_date": "",
+        "today_views": 0,
+        "success_count": 0,
+        "fail_count": 0,
+        "mode": "free",
+        "default_credits": 3,
+        "users": [],
+        "cracked_history": [],
+        "today_users": [],
+        "cooldown_seconds": 60,
+        "max_concurrent_tasks": 15,
+        "parallel_batches": []
+    }
+
+
 def load_stats():
     """Thread-safe loading of stats.json. Returns default layout if file is missing/corrupted."""
     with stats_lock:
         if not os.path.exists(STATS_FILE) or os.path.getsize(STATS_FILE) == 0:
-            return {
-                "total_views": 0,
-                "today_date": "",
-                "today_views": 0,
-                "success_count": 0,
-                "fail_count": 0,
-                "mode": "free",
-                "default_credits": 3,
-                "users": [],
-                "cracked_history": [],
-                "today_users": [],
-                "cooldown_seconds": 60,
-                "max_concurrent_tasks": 15
-            }
+            return _default_stats()
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -44,27 +50,16 @@ def load_stats():
                     ("cracked_history", []),
                     ("today_users", []),
                     ("cooldown_seconds", 60),
-                    ("max_concurrent_tasks", 15)
+                    ("max_concurrent_tasks", 15),
+                    ("parallel_batches", [])
                 ]:
                     if key not in data:
                         data[key] = default
                 return data
         except Exception as e:
             print(f"⚠️ [STATS] Error loading stats.json: {e}")
-            return {
-                "total_views": 0,
-                "today_date": "",
-                "today_views": 0,
-                "success_count": 0,
-                "fail_count": 0,
-                "mode": "free",
-                "default_credits": 3,
-                "users": [],
-                "cracked_history": [],
-                "today_users": [],
-                "cooldown_seconds": 60,
-                "max_concurrent_tasks": 15
-            }
+            return _default_stats()
+
 
 def save_stats(data):
     """Thread-safe atomic writing to stats.json."""
@@ -77,21 +72,22 @@ def save_stats(data):
         except Exception as e:
             print(f"⚠️ [STATS] Error writing to stats.json: {e}")
 
+
 def register_visit(chat_id, username=None, first_name=None):
     """Increments view counters and records user details for broadcasting."""
     with stats_lock:
         data = load_stats()
         today = datetime.date.today().isoformat()
-        
+
         try:
             str_chat_id = int(chat_id)
         except:
             str_chat_id = chat_id
-            
+
         # Initialize today_users if missing
         if "today_users" not in data:
             data["today_users"] = []
-            
+
         # Today's views reset handler
         if data["today_date"] != today:
             data["today_date"] = today
@@ -103,12 +99,12 @@ def register_visit(chat_id, username=None, first_name=None):
                 data["today_users"].append(str_chat_id)
                 data["today_views"] += 1
                 data["total_views"] += 1
-            
+
         # Migrate old integer list to list of dicts
         users_list = data.get("users", [])
         updated_users = []
         user_ids_seen = set()
-        
+
         for u in users_list:
             if isinstance(u, dict):
                 cid = u.get("chat_id")
@@ -128,14 +124,14 @@ def register_visit(chat_id, username=None, first_name=None):
                         })
                 except:
                     pass
-        
+
         # Check if user already registered
         existing_user = None
         for u in updated_users:
             if u["chat_id"] == str_chat_id:
                 existing_user = u
                 break
-                
+
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if existing_user:
             # Update name/username if changed or not set
@@ -152,21 +148,22 @@ def register_visit(chat_id, username=None, first_name=None):
                 "joined": now_str,
                 "credits": data.get("default_credits", 3)
             })
-            
+
         data["users"] = updated_users
         save_stats(data)
+
 
 def record_success(chat_id, user_info, name, mobile, uid, password, eid=None):
     """Increments success count and appends database record with user mappings and timestamps."""
     with stats_lock:
         data = load_stats()
         data["success_count"] += 1
-        
+
         username = user_info.get("username", "N/A") if user_info else "N/A"
         first_name = user_info.get("first_name", "N/A") if user_info else "N/A"
-        
+
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         record = {
             "timestamp": now,
             "chat_id": chat_id,
@@ -178,10 +175,10 @@ def record_success(chat_id, user_info, name, mobile, uid, password, eid=None):
             "password": password,
             "eid": eid or "N/A"
         }
-        
+
         data["cracked_history"].append(record)
         save_stats(data)
-        
+
         # Append to running permanent database text file log
         txt_file_path = os.path.join(BASE_DIR, "cracked_history.txt")
         try:
@@ -197,12 +194,13 @@ def record_success(chat_id, user_info, name, mobile, uid, password, eid=None):
                 f.write("============================================================\n\n")
         except Exception as e:
             print(f"⚠️ [STATS] Failed to write to cracked_history.txt: {e}")
-        
+
         # Deduct credit if bot mode is paid
         try:
             deduct_user_credit(chat_id)
         except Exception as e:
             print(f"⚠️ [STATS] Error during success credit deduction: {e}")
+
 
 def record_failure():
     """Increments failure counter."""
@@ -211,19 +209,20 @@ def record_failure():
         data["fail_count"] += 1
         save_stats(data)
 
+
 def get_stats_summary(active_user_states):
     """Compiles statistics into a premium, app-like visual dashboard for the Admin Telegram Panel."""
     data = load_stats()
-    
+
     # Analyze active user states
     steps_breakdown = {}
     for uid, state_dict in active_user_states.items():
         step = state_dict.get("step", "IDLE")
         if step != "IDLE":
             steps_breakdown[step] = steps_breakdown.get(step, 0) + 1
-            
+
     active_count = sum(steps_breakdown.values())
-    
+
     active_details = ""
     if active_count > 0:
         active_details = ""
@@ -236,13 +235,13 @@ def get_stats_summary(active_user_states):
     def_credits = data.get("default_credits", 3)
     cooldown = data.get("cooldown_seconds", 60)
     max_concurrent = data.get("max_concurrent_tasks", 15)
-    
+
     # Calculate success rate safely
     total_runs = data['success_count'] + data['fail_count']
     success_rate = 100
     if total_runs > 0:
         success_rate = int((data['success_count'] / total_runs) * 100)
-        
+
     # Calculate user vs group splits
     total_users = 0
     total_groups = 0
@@ -258,7 +257,25 @@ def get_stats_summary(active_user_states):
             total_users += 1
         elif cid < 0:
             total_groups += 1
-        
+
+    # Recent parallel batches (last 5)
+    recent_batches = data.get("parallel_batches", [])[-5:]
+    batch_details = ""
+    if recent_batches:
+        batch_details = "\n🚀 <b>RECENT PARALLEL BATCHES:</b>\n"
+        for b in reversed(recent_batches):
+            bid = b.get("batch_id", "?")
+            tgt = b.get("targets", 0)
+            done = b.get("done", "—")
+            failed = b.get("failed", "—")
+            started = b.get("started_at", "N/A")
+            batch_details += (
+                f"  ├─ <code>{bid}</code> • {tgt} targets • "
+                f"✅ {done} / ❌ {failed}\n"
+                f"  │   <i>{started}</i>\n"
+            )
+        batch_details += "\n"
+
     summary = (
         "<b>ADMINISTRATION DASHBOARD v3.5</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -276,15 +293,17 @@ def get_stats_summary(active_user_states):
         f"  └─ Success Rate:    <b>{success_rate}%</b> (<code>{data['success_count']} ✅</code> / <code>{data['fail_count']} ❌</code>)\n\n"
         f"👥 <b>ACTIVE ROOMS:</b> <code>{active_count} active</code>\n"
         f"{active_details}"
+        f"{batch_details}"
         "━━━━━━━━━━━━━━━━━━━━━━"
     )
     return summary
+
 
 def get_cracked_data_file_path():
     """Generates a text report of all cracked history database records with mapping & timestamps."""
     data = load_stats()
     report_path = os.path.join(BASE_DIR, "cracked_history_report.txt")
-    
+
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write("============================================================\n")
@@ -292,7 +311,7 @@ def get_cracked_data_file_path():
             f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Total Successes: {data['success_count']}\n")
             f.write("============================================================\n\n")
-            
+
             history = data.get("cracked_history", [])
             if not history:
                 f.write("No cracked Aadhaar records found in database history yet.\n")
@@ -312,13 +331,14 @@ def get_cracked_data_file_path():
         print(f"⚠️ [STATS] Failed to generate text database report: {e}")
         return None
 
+
 def log_error(chat_id, user_info, error_msg):
     """Appends an error entry to errors.log with timestamps and user details."""
     with error_log_lock:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         username = user_info.get("username", "N/A") if user_info else "N/A"
         first_name = user_info.get("first_name", "N/A") if user_info else "N/A"
-        
+
         entry = f"[{now}] User: {first_name} (@{username}) [ID: {chat_id}] | Error: {error_msg}\n"
         try:
             with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
@@ -326,11 +346,13 @@ def log_error(chat_id, user_info, error_msg):
         except Exception as e:
             print(f"⚠️ [STATS] Failed to write to errors.log: {e}")
 
+
 def get_error_log_file_path():
     """Returns the path to errors.log if it exists and is not empty."""
     if os.path.exists(ERROR_LOG_FILE) and os.path.getsize(ERROR_LOG_FILE) > 0:
         return ERROR_LOG_FILE
     return None
+
 
 # --- CREDIT & COOLDOWN MANAGEMENT SYSTEM ---
 
@@ -340,6 +362,7 @@ def get_bot_mode():
         data = load_stats()
         return data.get("mode", "free")
 
+
 def set_bot_mode(mode):
     """Sets the bot mode ('free' or 'paid')."""
     with stats_lock:
@@ -347,11 +370,13 @@ def set_bot_mode(mode):
         data["mode"] = mode
         save_stats(data)
 
+
 def get_default_credits():
     """Returns the default credits count."""
     with stats_lock:
         data = load_stats()
         return data.get("default_credits", 3)
+
 
 def set_default_credits(count):
     """Sets the default credits count."""
@@ -359,6 +384,7 @@ def set_default_credits(count):
         data = load_stats()
         data["default_credits"] = int(count)
         save_stats(data)
+
 
 def get_user_credits(chat_id):
     """Returns the credits of the user. Defaults to default_credits."""
@@ -368,11 +394,12 @@ def get_user_credits(chat_id):
             str_chat_id = int(chat_id)
         except:
             str_chat_id = chat_id
-            
+
         for u in data.get("users", []):
             if isinstance(u, dict) and u.get("chat_id") == str_chat_id:
                 return u.get("credits", data.get("default_credits", 3))
         return data.get("default_credits", 3)
+
 
 def add_user_credits(chat_id, amount):
     """Adds (or subtracts if negative) user credits. Returns the new credit balance."""
@@ -382,7 +409,7 @@ def add_user_credits(chat_id, amount):
             str_chat_id = int(chat_id)
         except:
             str_chat_id = chat_id
-            
+
         user_found = False
         new_balance = 0
         for u in data.get("users", []):
@@ -392,7 +419,7 @@ def add_user_credits(chat_id, amount):
                 new_balance = u["credits"]
                 user_found = True
                 break
-                
+
         if not user_found:
             new_balance = max(0, data.get("default_credits", 3) + amount)
             data["users"].append({
@@ -402,9 +429,10 @@ def add_user_credits(chat_id, amount):
                 "joined": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "credits": new_balance
             })
-            
+
         save_stats(data)
         return new_balance
+
 
 def deduct_user_credit(chat_id):
     """Deducts 1 credit from user if bot is in paid mode."""
@@ -412,12 +440,12 @@ def deduct_user_credit(chat_id):
         data = load_stats()
         if data.get("mode", "free") != "paid":
             return
-            
+
         try:
             str_chat_id = int(chat_id)
         except:
             str_chat_id = chat_id
-            
+
         for u in data.get("users", []):
             if isinstance(u, dict) and u.get("chat_id") == str_chat_id:
                 current_credits = u.get("credits", data.get("default_credits", 3))
@@ -425,8 +453,10 @@ def deduct_user_credit(chat_id):
                 break
         save_stats(data)
 
+
 # In-memory global variables for cooldown tracking
 last_global_run_time = 0
+
 
 def check_global_cooldown():
     """Checks if the global cooldown is active. Returns (allowed, remaining_seconds)."""
@@ -439,16 +469,19 @@ def check_global_cooldown():
     else:
         return False, max(1, cooldown_limit - int(elapsed))
 
+
 def update_global_run_time():
     """Updates the global cooldown timer to the current time."""
     global last_global_run_time
     last_global_run_time = time.time()
+
 
 def get_cooldown_seconds():
     """Returns the configured global cooldown in seconds (default: 60)."""
     with stats_lock:
         data = load_stats()
         return data.get("cooldown_seconds", 60)
+
 
 def set_cooldown_seconds(val):
     """Sets the global cooldown in seconds."""
@@ -457,11 +490,13 @@ def set_cooldown_seconds(val):
         data["cooldown_seconds"] = int(val)
         save_stats(data)
 
+
 def get_max_concurrent_tasks():
     """Returns the configured concurrency limit (default: 15)."""
     with stats_lock:
         data = load_stats()
         return data.get("max_concurrent_tasks", 15)
+
 
 def set_max_concurrent_tasks(val):
     """Sets the concurrency limit."""
@@ -469,6 +504,7 @@ def set_max_concurrent_tasks(val):
         data = load_stats()
         data["max_concurrent_tasks"] = int(val)
         save_stats(data)
+
 
 def is_user_registered(chat_id):
     """Checks if a user is already registered in our database."""
@@ -483,6 +519,7 @@ def is_user_registered(chat_id):
                 return True
         return False
 
+
 def find_cracked_record(mobile):
     """Searches the cracked history database for a record matching the mobile number."""
     import re
@@ -494,3 +531,48 @@ def find_cracked_record(mobile):
             if rec_mobile == clean_mobile:
                 return record
         return None
+
+
+# ==============================================================================
+# 🚀 PARALLEL BATCH TRACKING (NEW)
+# ==============================================================================
+
+def record_parallel_batch(batch_id, chat_id, target_count):
+    """Registers a new parallel batch when it starts."""
+    with stats_lock:
+        data = load_stats()
+        batches = data.get("parallel_batches", [])
+
+        # Trim to keep last 20 batches max
+        if len(batches) >= 20:
+            batches = batches[-19:]
+
+        batches.append({
+            "batch_id": batch_id,
+            "chat_id": chat_id,
+            "targets": target_count,
+            "done": 0,
+            "failed": 0,
+            "started_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None
+        })
+        data["parallel_batches"] = batches
+        save_stats(data)
+
+
+def update_parallel_batch_status(batch_id, done=None, failed=None):
+    """Updates progress of a running parallel batch."""
+    with stats_lock:
+        data = load_stats()
+        batches = data.get("parallel_batches", [])
+        for b in batches:
+            if b.get("batch_id") == batch_id:
+                if done is not None:
+                    b["done"] = done
+                if failed is not None:
+                    b["failed"] = failed
+                if done is not None or failed is not None:
+                    b["finished_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                break
+        data["parallel_batches"] = batches
+        save_stats(data)
