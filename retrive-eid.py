@@ -13,7 +13,9 @@ BASE_URL = "https://tathya.uidai.gov.in"
 CAPTCHA_URL = f"{BASE_URL}/audioCaptchaService/api/captcha/v3/generation"
 RETRIEVE_URL = f"{BASE_URL}/retrieveEidUid/ext/v1/generic/retrieveuideid"
 
-def run_retrieval(name, dob, mobile):
+
+def run_retrieval(name, dob, mobile, unique_suffix=""):
+    # Prewarm path: read NAME|DOB from stdin when invoked with WAIT_INPUT placeholders
     if name == "WAIT_INPUT" or dob == "WAIT_INPUT":
         print("🔑 WAITING_FOR_NAME_DOB")
         sys.stdout.flush()
@@ -201,11 +203,11 @@ def run_retrieval(name, dob, mobile):
         raise Exception(last_server_msg)
 
     # Prompt for OTP
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🔑 ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE")
     sys.stdout.flush()
     otp_code = sys.stdin.readline().strip()
-    print("="*60)
+    print("=" * 60)
 
     if not otp_code:
         raise Exception("No OTP entered.")
@@ -220,10 +222,10 @@ def run_retrieval(name, dob, mobile):
 
     if final_data.get('status') == "Success":
         res_data = final_data.get('responseData') or {}
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("📊 FULL SERVER RESPONSE DATA:")
         print(json.dumps(final_data, indent=4))
-        print("="*60)
+        print("=" * 60)
 
         captured_id = res_data.get('eidNumber') or res_data.get('uidNumber') or res_data.get('aadhaarNumber')
         captured_name = res_data.get('name')
@@ -235,11 +237,14 @@ def run_retrieval(name, dob, mobile):
         error_msg = final_data.get('responseData', {}).get('message', 'Incorrect OTP')
         raise Exception(f"OTP submission failed: {error_msg}")
 
+
 if __name__ == "__main__":
     if len(sys.argv) >= 4:
         NAME = sys.argv[1]
         DOB = sys.argv[2]
         MOBILE = sys.argv[3]
+        # Optional 4th arg: unique suffix (used to keep stderr/stdout trace clean per parallel run)
+        UNIQUE_SUFFIX = sys.argv[4] if len(sys.argv) >= 5 else ""
     else:
         # Prompt user dynamically if no arguments are provided
         print("Please enter Aadhaar Holder Name (with prefix if any):")
@@ -253,9 +258,10 @@ if __name__ == "__main__":
         print("Please enter Registered Mobile Number:")
         sys.stdout.flush()
         MOBILE = sys.stdin.readline().strip()
+        UNIQUE_SUFFIX = ""
 
     try:
-        run_retrieval(NAME, DOB, MOBILE)
+        run_retrieval(NAME, DOB, MOBILE, unique_suffix=UNIQUE_SUFFIX)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
