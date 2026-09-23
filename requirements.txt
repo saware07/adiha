@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+requests
+urllib3
+python-dotenv
+ddddocr
+pymupdf
+phonenumbers
