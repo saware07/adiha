@@ -14,7 +14,7 @@ CAPTCHA_URL = f"{BASE_URL}/audioCaptchaService/api/captcha/v3/generation"
 RETRIEVE_URL = f"{BASE_URL}/retrieveEidUid/ext/v1/generic/retrieveuideid"
 
 
-def run_retrieval(name, dob, mobile, unique_suffix=""):
+def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
     # Prewarm path: read NAME|DOB from stdin when invoked with WAIT_INPUT placeholders
     if name == "WAIT_INPUT" or dob == "WAIT_INPUT":
         print("🔑 WAITING_FOR_NAME_DOB")
@@ -77,16 +77,27 @@ def run_retrieval(name, dob, mobile, unique_suffix=""):
         "audioCaptchaRequired": True
     }
 
-    # Generate list of name candidates (prefixes) to try sequentially
+    # ============================================================================
+    # Name candidates — auto mode sends exactly what we got (like aad.py),
+    # manual mode rotates prefixes (for /start where user types "Mr"/"Mrs")
+    # ============================================================================
     candidate_names = []
     name_clean = name.strip()
 
-    if name_clean.lower() == "mr":
-        candidate_names = ["Mr", "Mr.", "Shri", "Sh.", "Kumar"]
-    elif name_clean.lower() == "mrs":
-        candidate_names = ["Mrs", "Mrs.", "Ms", "Ms.", "Smt", "Smt.", "Miss", "Kumari"]
-    else:
+    if auto_mode:
+        # 🔥 AUTO MODE — send exactly the name from the API, no rotation.
+        # This matches aad.py's behaviour and prevents "no record found" errors.
         candidate_names = [name_clean]
+        print(f"🔍 [AUTO MODE] Sending name as-is: '{name_clean}'")
+    else:
+        # MANUAL MODE — rotate through prefix variants
+        if name_clean.lower() == "mr":
+            candidate_names = ["Mr", "Mr.", "Shri", "Sh.", "Kumar"]
+        elif name_clean.lower() == "mrs":
+            candidate_names = ["Mrs", "Mrs.", "Ms", "Ms.", "Smt", "Smt.", "Miss", "Kumari"]
+        else:
+            candidate_names = [name_clean]
+        print(f"🔍 [MANUAL MODE] Candidate names: {candidate_names}")
 
     cap_txn_id = None
     otp_txn_id = None
@@ -243,8 +254,8 @@ if __name__ == "__main__":
         NAME = sys.argv[1]
         DOB = sys.argv[2]
         MOBILE = sys.argv[3]
-        # Optional 4th arg: unique suffix (used to keep stderr/stdout trace clean per parallel run)
         UNIQUE_SUFFIX = sys.argv[4] if len(sys.argv) >= 5 else ""
+        AUTO_MODE = (len(sys.argv) >= 6 and sys.argv[5].lower() == "auto")
     else:
         # Prompt user dynamically if no arguments are provided
         print("Please enter Aadhaar Holder Name (with prefix if any):")
@@ -259,9 +270,10 @@ if __name__ == "__main__":
         sys.stdout.flush()
         MOBILE = sys.stdin.readline().strip()
         UNIQUE_SUFFIX = ""
+        AUTO_MODE = False
 
     try:
-        run_retrieval(NAME, DOB, MOBILE, unique_suffix=UNIQUE_SUFFIX)
+        run_retrieval(NAME, DOB, MOBILE, unique_suffix=UNIQUE_SUFFIX, auto_mode=AUTO_MODE)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
