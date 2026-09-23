@@ -625,10 +625,14 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=60, interval=3, se
         iterations = max(1, timeout // interval)
         print(f"[OTP-WAIT] start timeout={timeout}s iterations={iterations} cid={cid[:10]}", flush=True)
         for i in range(iterations):
+            print(f"[HEARTBEAT-OTP] iter {i+1}/{iterations} START", flush=True)
             try:
                 fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=30'
+                print(f"[HEARTBEAT-OTP] fetching {fetch_url[:80]}...", flush=True)
                 async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                    print(f"[HEARTBEAT-OTP] HTTP {r.status}", flush=True)
                     msgs = await r.json() or {}
+                    print(f"[HEARTBEAT-OTP] parsed {len(msgs)} messages", flush=True)
                 if isinstance(msgs, dict):
                     for key, val in msgs.items():
                         if key in known_keys:
@@ -1042,15 +1046,18 @@ class AadhaarEngine:
         last_ctxn = None
         lerr = ""
         for attempt in range(1, 6):
+            print(f"[PHASE1 {phone}] attempt {attempt}: updating status...", flush=True)
             self.update_status(
                 f"📱 <b>[{phone}]</b>\n"
                 f"〔 #{idx}/{total} 〕\n"
                 f"✓ Name: <b>{escape_html(name)}</b>\n"
                 f"⟳ <i>Captcha {attempt}/5...</i>"
             )
+            print(f"[PHASE1 {phone}] attempt {attempt}: fetching captcha...", flush=True)
             img, ctxn, tid = await asyncio.get_event_loop().run_in_executor(
                 None, _uidai_get_captcha
             )
+            print(f"[PHASE1 {phone}] attempt {attempt}: captcha fetched (len={len(img) if img else 0})", flush=True)
             if not img:
                 lerr = "Captcha unavailable"
                 await asyncio.sleep(1)
@@ -1600,10 +1607,12 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
         engine.update_status = prefixed
 
         try:
+            print(f"[SEQ] About to call run_auto_pipeline for {phone}", flush=True)
             success = await asyncio.wait_for(
                 engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total),
                 timeout=300
             )
+            print(f"[SEQ] run_auto_pipeline returned: {success}", flush=True)
             if success:
                 results["success"] += 1
                 print(f"✅ [AUTO SEQ] #{idx}/{total} {phone} SUCCESS", flush=True)
