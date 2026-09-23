@@ -6,3 +6,4 @@ ddddocr
 pymupdf
 phonenumbers
 pysocks
+aiohttp
