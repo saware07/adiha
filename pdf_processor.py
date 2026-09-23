@@ -6,8 +6,10 @@ import itertools
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+
 def log_progress(msg):
     print(f"PROGRESS|{msg}", flush=True)
+
 
 # 🟢 Prefix Generator
 def get_prefixes(name):
@@ -18,6 +20,7 @@ def get_prefixes(name):
     else:
         # If name is shorter than 4 characters (e.g. DEV), use it directly without padding
         return [clean]
+
 
 def check_range(pdf_path, prefixes, year_range):
     """Worker function to check a list of prefixes against a year range."""
@@ -35,6 +38,7 @@ def check_range(pdf_path, prefixes, year_range):
         pass
     return None
 
+
 def main():
     if len(sys.argv) < 6:
         print("ERROR|Missing arguments")
@@ -46,9 +50,15 @@ def main():
     req_id = sys.argv[4]
     is_premium = sys.argv[5].lower() == 'true'
 
-    unlocked_pdf = os.path.join(output_dir, f"Unlocked_{req_id}.pdf")
-    front_img = os.path.join(output_dir, f"Front_{req_id}.jpg")
-    back_img = os.path.join(output_dir, f"Back_{req_id}.jpg")
+    # req_id is expected to already be unique (e.g. "123456789_p0" for parallel runs)
+    # Safely slugify it to avoid odd filename characters just in case
+    safe_req_id = "".join(c for c in str(req_id) if c.isalnum() or c in ('_', '-'))
+    if not safe_req_id:
+        safe_req_id = "out"
+
+    unlocked_pdf = os.path.join(output_dir, f"Unlocked_{safe_req_id}.pdf")
+    front_img = os.path.join(output_dir, f"Front_{safe_req_id}.jpg")
+    back_img = os.path.join(output_dir, f"Back_{safe_req_id}.jpg")
 
     try:
         doc = fitz.open(pdf_path)
@@ -59,7 +69,7 @@ def main():
         final_password = ""
         if doc.is_encrypted:
             auth_success = False
-            
+
             # --- LEVEL 1: Smart Guess ---
             prefixes_smart = get_prefixes(name_hint)
             log_progress(f"Starting Smart Guess scan...")
@@ -70,17 +80,18 @@ def main():
                         final_password = t_pass
                         auth_success = True
                         break
-                if auth_success: break
-            
+                if auth_success:
+                    break
+
             if not auth_success:
                 print(f"UNCRACKED|{pdf_path}")
                 sys.exit(0)
 
             # Re-verify and save
             doc.authenticate(final_password)
-        
+
         doc.save(unlocked_pdf)
-        
+
         # Extract Aadhaar Number — try multiple known formats
         aadhaar_number = "Not Found"
         page = doc[0]
@@ -97,7 +108,7 @@ def main():
             if len(line) == 12 and line.isdigit():
                 aadhaar_number = f"{line[:4]} {line[4:8]} {line[8:]}"
                 break
-        
+
         # Render Images — detect if front/back are side-by-side (single page) or separate pages
         mat = fitz.Matrix(2, 2)
         w, h = page.rect.width, page.rect.height
@@ -112,22 +123,24 @@ def main():
         else:
             # Single-page side-by-side layout
             front_rect = fitz.Rect(w * 0.02, h * 0.60, w * 0.50, h * 0.98)
-            back_rect  = fitz.Rect(w * 0.50, h * 0.60, w * 0.98, h * 0.98)
+            back_rect = fitz.Rect(w * 0.50, h * 0.60, w * 0.98, h * 0.98)
             pix_f = page.get_pixmap(matrix=mat, clip=front_rect)
             pix_b = page.get_pixmap(matrix=mat, clip=back_rect)
             if pix_f.width > 10:
                 pix_f.save(front_img)
             else:
                 page.get_pixmap(matrix=mat).save(front_img)
-                import shutil; shutil.copy(front_img, back_img)
+                import shutil
+                shutil.copy(front_img, back_img)
             pix_b.save(back_img)
-        
+
         doc.close()
         print(f"SUCCESS|{aadhaar_number}|{unlocked_pdf}|{front_img}|{back_img}|{final_password}")
 
     except Exception as e:
         print(f"ERROR|{str(e)}")
         sys.exit(2)
+
 
 if __name__ == "__main__":
     main()
