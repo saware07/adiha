@@ -15,7 +15,7 @@ RETRIEVE_URL = f"{BASE_URL}/retrieveEidUid/ext/v1/generic/retrieveuideid"
 
 
 def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
-    # Prewarm path: read NAME|DOB from stdin when invoked with WAIT_INPUT placeholders
+    # Prewarm path
     if name == "WAIT_INPUT" or dob == "WAIT_INPUT":
         print("🔑 WAITING_FOR_NAME_DOB")
         sys.stdout.flush()
@@ -32,14 +32,14 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
     if dob == "None" or dob == "null" or dob == "":
         dob = None
 
-    # Session starts here (to maintain cookies)
+    # Session
     session = requests.Session()
     from requests.adapters import HTTPAdapter
     from urllib3.util import Retry
     retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
 
-    # Attach a random proxy from proxies.txt (ArealProxy etc.)
+    # Proxy
     try:
         import proxy_loader
         proxy = proxy_loader.apply_proxy(session)
@@ -54,7 +54,7 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
 
     request_id = str(uuid.uuid4())
 
-    # Strict Browser-like Headers
+    # Headers — same as aad.py
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en_IN",
@@ -70,7 +70,9 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
         "Connection": "keep-alive"
     }
 
-    print("--- STEP 1: Fetching Captcha ---")
+    print(f"--- STEP 1: Fetching Captcha ---")
+    sys.stdout.flush()
+
     captcha_payload = {
         "captchaLength": "6",
         "captchaType": "2",
@@ -78,19 +80,18 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
     }
 
     # ============================================================================
-    # Name candidates — auto mode sends exactly what we got (like aad.py),
-    # manual mode rotates prefixes (for /start where user types "Mr"/"Mrs")
+    # Name candidates:
+    #   - auto_mode=True  → send name EXACTLY as passed (matches aad.py)
+    #   - auto_mode=False → rotate prefixes (manual /start flow only)
     # ============================================================================
     candidate_names = []
     name_clean = name.strip()
 
     if auto_mode:
-        # 🔥 AUTO MODE — send exactly the name from the API, no rotation.
-        # This matches aad.py's behaviour and prevents "no record found" errors.
         candidate_names = [name_clean]
         print(f"🔍 [AUTO MODE] Sending name as-is: '{name_clean}'")
+        sys.stdout.flush()
     else:
-        # MANUAL MODE — rotate through prefix variants
         if name_clean.lower() == "mr":
             candidate_names = ["Mr", "Mr.", "Shri", "Sh.", "Kumar"]
         elif name_clean.lower() == "mrs":
@@ -98,11 +99,11 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
         else:
             candidate_names = [name_clean]
         print(f"🔍 [MANUAL MODE] Candidate names: {candidate_names}")
+        sys.stdout.flush()
 
     cap_txn_id = None
     otp_txn_id = None
-    last_server_msg = "Failed to send OTP. Try changing prefix to 'Mrs. ' or 'Ms. ' in the code."
-
+    last_server_msg = "Failed to send OTP after max attempts."
     success_details_payload = None
     success_captcha_val = None
     technical_diff = False
@@ -111,49 +112,81 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
         if technical_diff:
             break
         print(f"🔍 [RETRIEVAL] Trying name payload: '{full_name}'...")
+        sys.stdout.flush()
 
-        max_captcha_retries = 3
-        attempt = 1
-        captcha_attempts = 0
-        max_captcha_attempts = 10
-        candidate_success = False
-
-        while attempt <= max_captcha_retries and captcha_attempts < max_captcha_attempts:
-            captcha_attempts += 1
+        # Up to 5 captcha attempts per name — same as aad.py's `range(1, 6)`
+        sent = False
+        for attempt in range(1, 6):
             try:
                 res_cap = session.post(CAPTCHA_URL, json=captcha_payload, headers=headers, timeout=30)
-                res_cap.raise_for_status()
+                if res_cap.status_code != 200:
+                    print(f"⚠️ Captcha fetch HTTP {res_cap.status_code}")
+                    sys.stdout.flush()
+                    continue
+
                 try:
                     cap_data = res_cap.json()
                 except ValueError:
-                    raise Exception("Aadhaar Portal returned an invalid non-JSON page during captcha load. Gateway might be down.")
+                    raise Exception("Aadhaar Portal returned non-JSON during captcha load.")
 
                 if not cap_data or 'imageBase64' not in cap_data or 'transactionId' not in cap_data:
-                    raise Exception("UIDAI captcha generation failed. Invalid server response.")
+                    raise Exception("UIDAI captcha generation failed. Invalid response.")
 
                 img_b64 = cap_data['imageBase64']
                 cap_txn_id = cap_data['transactionId']
 
-                # Solve captcha with ddddocr
+                # Solve captcha
                 img_bytes = base64.b64decode(img_b64)
-                if attempt >= 3:
+
+                # After 3 failed attempts, ask user (manual mode only)
+                if attempt >= 3 and not auto_mode:
                     print(f"🔑 MANUAL CAPTCHA REQUIRED | {img_b64}")
                     sys.stdout.flush()
                     captcha_val = sys.stdin.readline().strip()
                     if not captcha_val:
                         raise Exception("No manual captcha entered.")
                 else:
-                    ocr = ddddocr.DdddOcr(show_ad=False)
-                    res = ocr.classification(img_bytes)
-                    captcha_val = str(res or '').strip()
-                    captcha_val = re.sub(r'[^a-zA-Z0-9]', '', captcha_val)
+                    # Try beta OCR first (better for noisy captchas)
+                    captcha_val = ""
+                    try:
+                        import io
+                        from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+                        im = Image.open(io.BytesIO(img_bytes))
+                        if im.mode != 'L':
+                            im = im.convert('L')
+                        w, h = im.size
+                        im = im.resize((w * 2, h * 2), Image.LANCZOS)
+                        im = im.filter(ImageFilter.MedianFilter(3))
+                        im = ImageEnhance.Contrast(im).enhance(2.0)
+                        im = ImageEnhance.Sharpness(im).enhance(2.0)
+                        im = im.point(lambda p: 255 if p > 140 else 0)
+                        im = ImageOps.autocontrast(im, cutoff=5)
+                        buf = io.BytesIO()
+                        im.save(buf, format='PNG')
+                        ocr_beta = ddddocr.DdddOcr(beta=True, show_ad=False)
+                        r = ocr_beta.classification(buf.getvalue())
+                        if r and len(r) >= 4:
+                            r = ''.join(c for c in r if c.isalnum())
+                            if len(r) >= 4:
+                                captcha_val = r[:6]
+                    except: pass
 
-                    if len(captcha_val) != 6:
-                        print(f"⚠️ [OCR] Rejected noisy read '{captcha_val}' (Length {len(captcha_val)} != 6). Fetching new captcha...")
+                    if not captcha_val:
+                        # Fallback to normal model
+                        ocr = ddddocr.DdddOcr(show_ad=False)
+                        res = ocr.classification(img_bytes)
+                        captcha_val = str(res or '').strip()
+                        captcha_val = re.sub(r'[^a-zA-Z0-9]', '', captcha_val)
+
+                    if len(captcha_val) < 4:
+                        print(f"⚠️ [OCR] Rejected noisy read '{captcha_val}' (len {len(captcha_val)}). Retrying...")
+                        sys.stdout.flush()
                         continue
 
                 print(f"Decoded Captcha: {captcha_val}")
+                sys.stdout.flush()
 
+                # Send EID OTP request
                 details_payload = {
                     "name": full_name,
                     "mobileNumber": str(mobile),
@@ -171,21 +204,23 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
                 try:
                     otp_res_json = res_otp.json()
                 except ValueError:
-                    raise Exception("Aadhaar Portal returned an invalid non-JSON page during EID search. Gateway might be down.")
+                    raise Exception("Aadhaar Portal returned non-JSON during EID search.")
 
                 res_data = otp_res_json.get('responseData') or {}
                 if otp_res_json.get('status') == "Success" or res_data.get('otpSent'):
                     otp_txn_id = res_data.get('otpTxnId')
                     if otp_txn_id:
                         print(f"✅ OTP Sent Successfully for Name: {full_name}")
-                        candidate_success = True
+                        sys.stdout.flush()
+                        sent = True
                         success_details_payload = details_payload
                         success_captcha_val = captcha_val
                         break
 
-                # If not broken by success, log the response and check for errors
+                # Log response
                 msg = res_data.get('message') or otp_res_json.get('message') or ''
                 print(f"Server Response for '{full_name}' (Attempt {attempt}): {msg}")
+                sys.stdout.flush()
                 if msg:
                     last_server_msg = msg
 
@@ -195,25 +230,29 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
                     break
 
                 if msg and any(x in msg.lower() for x in ["mismatch", "no record", "validation failed", "invalid"]):
-                    print(f"📦 Response for '{full_name}': {msg}. Trying next name payload candidate...")
+                    print(f"📦 Response for '{full_name}': {msg}. Trying next name payload...")
+                    sys.stdout.flush()
                     break
 
-                # Captcha issue, loop continues to retry for current candidate
-                attempt += 1
+                # Captcha issue, loop continues
+
             except Exception as ex:
-                if attempt == max_captcha_retries or captcha_attempts == max_captcha_attempts:
-                    print(f"⚠️ Error for '{full_name}' on attempt {attempt}: {ex}")
+                print(f"⚠️ Error on attempt {attempt} for '{full_name}': {ex}")
+                sys.stdout.flush()
+                if attempt >= 5:
                     break
 
         if technical_diff:
             break
-        if candidate_success:
+        if sent:
             break
 
     if not otp_txn_id:
         raise Exception(last_server_msg)
 
+    # ============================================================================
     # Prompt for OTP
+    # ============================================================================
     print("\n" + "=" * 60)
     print("🔑 ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE")
     sys.stdout.flush()
@@ -223,6 +262,7 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
     if not otp_code:
         raise Exception("No OTP entered.")
 
+    # Verify OTP → get EID
     final_payload = success_details_payload.copy()
     final_payload["otp"] = otp_code
     final_payload["otpTxnId"] = otp_txn_id
@@ -244,6 +284,9 @@ def run_retrieval(name, dob, mobile, unique_suffix="", auto_mode=False):
             print(f"\n✅ CAPTURED ID SUCCESSFULLY: {captured_id}")
             if captured_name:
                 print(f"👤 CAPTURED NAME SUCCESSFULLY: {captured_name}")
+            sys.stdout.flush()
+        else:
+            raise Exception("No EID in response")
     else:
         error_msg = final_data.get('responseData', {}).get('message', 'Incorrect OTP')
         raise Exception(f"OTP submission failed: {error_msg}")
@@ -257,15 +300,12 @@ if __name__ == "__main__":
         UNIQUE_SUFFIX = sys.argv[4] if len(sys.argv) >= 5 else ""
         AUTO_MODE = (len(sys.argv) >= 6 and sys.argv[5].lower() == "auto")
     else:
-        # Prompt user dynamically if no arguments are provided
         print("Please enter Aadhaar Holder Name (with prefix if any):")
         sys.stdout.flush()
         NAME = sys.stdin.readline().strip()
-
         print("Please enter Date of Birth (DD-MM-YYYY):")
         sys.stdout.flush()
         DOB = sys.stdin.readline().strip()
-
         print("Please enter Registered Mobile Number:")
         sys.stdout.flush()
         MOBILE = sys.stdin.readline().strip()
