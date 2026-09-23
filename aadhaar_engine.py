@@ -334,6 +334,9 @@ class AadhaarEngine:
         self._preloader_active = False
         self._preloader_task = None
         self.temp_msg_ids = []
+        # Parallel-batch-specific attributes
+        self._unique_suffix = ""
+        self._force_auto_otp = False
 
     def update_status(self, text):
         """Updates a single live status message dynamically to avoid spamming the chat."""
@@ -644,6 +647,7 @@ class AadhaarEngine:
                 print(f"🚀 [ENGINE] Starting fresh Aadhaar Retrieval for {name} ({formatted_dob_iso})...")
                 process = await asyncio.create_subprocess_exec(
                     sys.executable, '-u', get_eid_script, name, str(formatted_dob_iso), mobile,
+                    self._unique_suffix,  # Optional unique suffix for parallel runs
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
@@ -696,7 +700,7 @@ class AadhaarEngine:
                     self.stop_preloader()
 
                     # Save temporary image file
-                    temp_captcha_path = os.path.join(script_dir, f"temp_captcha_p1_{chat_id}.png")
+                    temp_captcha_path = os.path.join(script_dir, f"temp_captcha_p1_{chat_id}{self._unique_suffix}.png")
                     with open(temp_captcha_path, "wb") as f_cap:
                         f_cap.write(base64.b64decode(b64_img.encode()))
 
@@ -790,14 +794,17 @@ class AadhaarEngine:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         download_script = os.path.join(script_dir, 'aadhar-downlaod.py')
 
+        # Unique suffix so parallel engines don't collide on the same filename
+        unique_suffix = getattr(self, "_unique_suffix", "")
+
         max_retries = 3
         current_retry = 0
         while current_retry < max_retries:
             process = None
             try:
-                print(f"🚀 [ENGINE] Starting Aadhaar Download subprocess for EID {eid}...")
+                print(f"🚀 [ENGINE] Starting Aadhaar Download subprocess for EID {eid} (suffix={unique_suffix or 'none'})...")
                 process = await asyncio.create_subprocess_exec(
-                    sys.executable, '-u', download_script, str(eid), str(chat_id),
+                    sys.executable, '-u', download_script, str(eid), str(chat_id), unique_suffix,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
@@ -833,7 +840,7 @@ class AadhaarEngine:
                         self.stop_preloader()
 
                         # Save temporary image file
-                        temp_captcha_path = os.path.join(script_dir, f"temp_captcha_p2_{chat_id}.png")
+                        temp_captcha_path = os.path.join(script_dir, f"temp_captcha_p2_{chat_id}{self._unique_suffix}.png")
                         with open(temp_captcha_path, "wb") as f_cap:
                             f_cap.write(base64.b64decode(b64_img.encode()))
 
@@ -884,8 +891,8 @@ class AadhaarEngine:
 
                 await process.wait()
 
-                # Verify that download was indeed successful by checking file existence
-                file_path = os.path.join(CRACKED_DIR, f"Aadhaar_{chat_id}.pdf")
+                # Verify that download was indeed successful — suffix-aware path
+                file_path = os.path.join(CRACKED_DIR, f"Aadhaar_{chat_id}{unique_suffix}.pdf")
                 if os.path.exists(file_path):
                     await self.process_cracked_pdf(chat_id, file_path, name, mobile, eid=eid, user_info=user_info)
                     return
@@ -933,8 +940,13 @@ class AadhaarEngine:
             proc_script = os.path.join(script_dir, 'pdf_processor.py')
             # Always recreate the output dir in case user accidentally deleted it
             os.makedirs(CRACKED_DIR, exist_ok=True)
+
+            # Unique req_id so parallel engines don't collide on Unlocked_*.pdf / Front_*.jpg / Back_*.jpg
+            unique_suffix = getattr(self, "_unique_suffix", "")
+            req_id = f"{chat_id}{unique_suffix}"
+
             process = await asyncio.create_subprocess_exec(
-                sys.executable, proc_script, file_path, name, CRACKED_DIR, str(chat_id), 'True',
+                sys.executable, proc_script, file_path, name, CRACKED_DIR, str(req_id), 'True',
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
@@ -1281,6 +1293,12 @@ async def run_parallel_batch(bot, chat_id, mobile_targets):
     batch_id = str(uuid.uuid4())[:8]
     print(f"🚀 [BATCH] Starting parallel batch {batch_id} with {len(mobile_targets)} targets")
 
+    # Register batch start in stats (admin dashboard visibility)
+    try:
+        stats_manager.record_parallel_batch(batch_id, chat_id, len(mobile_targets))
+    except Exception as e:
+        print(f"⚠️ [STATS] Failed to record parallel batch: {e}")
+
     # Build per-target metadata
     targets_meta = []
     for idx, tgt in enumerate(mobile_targets):
@@ -1314,9 +1332,12 @@ async def run_parallel_batch(bot, chat_id, mobile_targets):
         phone = t["phone"]
         url = t["url"]
         cid = t["cid"]
+        target_idx = t["index"]
 
-        # Create a fresh engine bound to a unique per-target chat_id
+        # Create a fresh engine bound to the real chat_id
         engine = AadhaarEngine(bot, chat_id=real_chat_id)
+        # Unique suffix so parallel downloads / PDFs don't collide on disk
+        engine._unique_suffix = f"_p{target_idx}"
 
         # Prefix every status update with the target phone for parallel readability
         orig_update = engine.update_status
@@ -1349,7 +1370,7 @@ async def run_parallel_batch(bot, chat_id, mobile_targets):
 
         try:
             print(f"▶️ [BATCH {batch_id}] Starting Aadhaar flow for {phone}")
-            # Default prefix "Mrs" — the retrive-eid.py rotates through candidate prefixes
+            # Default prefix "Mrs" — retrive-eid.py rotates through candidate prefixes
             await engine.run_flow(real_chat_id, "Mrs", phone, None, user_info=None)
             return {"phone": phone, "status": "done"}
         except Exception as e:
@@ -1380,6 +1401,12 @@ async def run_parallel_batch(bot, chat_id, mobile_targets):
     # Summary
     done = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "done")
     failed = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "failed")
+
+    # Update stats with final counts
+    try:
+        stats_manager.update_parallel_batch_status(batch_id, done=done, failed=failed)
+    except Exception as e:
+        print(f"⚠️ [STATS] Failed to update batch status: {e}")
 
     summary = (
         f"🏁 <b>PARALLEL BATCH COMPLETE</b> ({batch_id})\n"
