@@ -1077,6 +1077,12 @@ def cmd_auto(message):
             parse_mode='HTML')
 
 
+@bot.message_handler(commands=['runall', 'batch'])
+def cmd_runall(message):
+    """Alias of /auto — kept for compatibility."""
+    cmd_auto(message)
+
+
 @bot.message_handler(commands=['stopauto'])
 def cmd_stopauto(message):
     chat_id = message.chat.id
@@ -1159,16 +1165,6 @@ def cmd_scan(message):
         asyncio.run_coroutine_threadsafe(run_scan(), loop)
     except Exception as e:
         bot.send_message(chat_id, f"❌ Scan error: {e}")
-
-
-# ==============================================================================
-# 🚀 /runall — alias of /auto
-# ==============================================================================
-
-@bot.message_handler(commands=['runall', 'batch'])
-def cmd_runall(message):
-    """Alias of /auto — kept for compatibility."""
-    cmd_auto(message)
 
 
 # ==============================================================================
@@ -1515,7 +1511,6 @@ def handle_all(message):
         return
     state = user_states.get(chat_id, {})
     str_chat_id = str(chat_id)
-    # Broadcast Message Interceptor
     if state.get('step') == 'AWAITING_BROADCAST_MSG':
         text_val = message.text.strip() if message.text else ""
         if text_val.lower() == 'cancel':
@@ -1530,7 +1525,6 @@ def handle_all(message):
     if not message.text:
         return
     text = message.text.strip()
-    # Admin config interceptors
     if state.get('step') == 'AWAITING_ADMIN_COOLDOWN':
         if text.lower() == 'cancel':
             user_states[chat_id] = {'step': 'IDLE'}
@@ -1611,7 +1605,6 @@ def handle_all(message):
         bot.send_message(chat_id, f"✅ Updated credits for <code>{target_id}</code>.\n💳 Added: <b>{amount}</b>\n💳 New Balance: <b>{new_bal}</b>", parse_mode='HTML', reply_markup=types.ReplyKeyboardRemove())
         send_admin_dashboard(chat_id)
         return
-    # Session cancellation
     if text.lower() in ['/cancel', 'cancel', 'reset', '/reset']:
         if str_chat_id in aadhaar_engine.user_page_registry:
             aadhaar_engine.user_page_registry[str_chat_id]['value'] = '__CANCEL__'
@@ -1630,7 +1623,6 @@ def handle_all(message):
         bot.send_message(chat_id, "❌ <b>Process Cancelled!</b>", parse_mode='HTML')
         send_welcome_dashboard(chat_id)
         return
-    # Mobile number extraction (manual /start flow)
     is_group = chat_id < 0
     starts_with_cmd = text.lower().startswith(('/aadhaar', '/aadhar'))
     extracted_target = None
@@ -1728,7 +1720,6 @@ def handle_all(message):
         bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
         user_states[chat_id] = {'step': 'AWAITING_MANUAL_PREF_SELECTION', 'num': extracted_target}
         return
-    # Captcha/OTP input for engine
     if str_chat_id in aadhaar_engine.user_page_registry and aadhaar_engine.user_page_registry[str_chat_id].get('value') is None:
         aadhaar_engine.user_page_registry[str_chat_id]['value'] = text
         if chat_id < 0:
@@ -1823,7 +1814,7 @@ def cleanup_temp_files():
 if __name__ == "__main__":
     cleanup_temp_files()
 
-    # ✅ CRITICAL: Remove any stale webhook before polling to avoid 409 conflicts
+    # Remove any stale webhook
     try:
         webhook_info = bot.get_webhook_info()
         if webhook_info and webhook_info.url:
